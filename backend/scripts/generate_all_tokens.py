@@ -13,18 +13,22 @@ CREDENTIALS_PATH = CREDS_DIR / 'credentials.json'
 
 # Combined scopes for all services
 SCOPES = [
-    # Gmail
+    # Gmail 
     'https://www.googleapis.com/auth/gmail.compose',
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
-    # Drive
+    
+    # Drive 
     'https://www.googleapis.com/auth/drive',
     'https://www.googleapis.com/auth/drive.file',
     'https://www.googleapis.com/auth/drive.metadata',
-    # Calendar
+    'https://www.googleapis.com/auth/drive.readonly',
+    
+    # Calendar 
     'https://www.googleapis.com/auth/calendar',
-    'https://www.googleapis.com/auth/calendar.events'
+    'https://www.googleapis.com/auth/calendar.events',
+    'https://www.googleapis.com/auth/calendar.readonly',
 ]
 
 def main():
