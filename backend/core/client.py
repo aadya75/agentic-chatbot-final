@@ -22,24 +22,11 @@ print(f"   Bright Data (API_TOKEN): {'✓' if API_TOKEN else '✗ MISSING'}")
 print(f"   Groq API Key: {'✓' if GROQ_API_KEY else '✗ MISSING'}")
 
 async def run_agent():
-    llm = ChatGroq(model_name="llama-3.1-8b-instant", temperature=0.9, api_key=GROQ_API_KEY)
+    llm = ChatGroq(model_name="llama-3.1-8b-instant", temperature=0.9, max_tokens=512, api_key=GROQ_API_KEY)
     print("✅ LLM created")
 
-    # Configure all MCP serv/ers
+    # Configure all MCP servers
     client = MultiServerMCPClient({
-        # "math": {
-        #     "command": "python",
-        #     "args": [r"E:\X\projects\MCPs\two_tools\math_server.py"],
-        #     "transport": "stdio",
-        # },
-        # "bright_data": {
-        #     "command": "cmd",
-        #     "args": ["/c", "npx", "@brightdata/mcp"],
-        #     "transport": "stdio",
-        #     "env": {
-        #         "API_TOKEN": API_TOKEN,
-        #     }
-        # },
         # "gmail": {
         #     "command": "python",
         #     "args": [str(MCP_SERVERS_DIR / "gmail_server.py")],
@@ -50,24 +37,9 @@ async def run_agent():
         #     "args": [str(MCP_SERVERS_DIR / "google_drive_server.py")],
         #     "transport": "stdio",
         # },
-        # "google_calendar": {
-        #     "command": "python",
-        #     "args": [str(MCP_SERVERS_DIR / "google_calendar_server.py")],
-        #     "transport": "stdio",
-        # },
-        # "ddgs": {
-        #     "command": sys.executable,  # Use current Python interpreter
-        #     "args": ["backend/mcp_servers/web_search.py"],
-        #     "transport": "stdio",
-        # },
-        "github": {
-            "command": "npx",
-            "args": [
-                "-y",
-                "@modelcontextprotocol/server-github",
-                "--github-personal-access-token",
-                GITHUB_TOKEN
-            ],
+        "google_calendar": {
+            "command": "python",
+            "args": [str(MCP_SERVERS_DIR / "google_calendar_server.py")],
             "transport": "stdio",
         }
     })
@@ -80,38 +52,8 @@ async def run_agent():
     
     agent = create_agent(llm, tools)
     print("✅ Agent created")
-    
-    # # Test 1: Math operations
-    # try:
-    #     print("\n" + "="*60)
-    #     print("🧮 Test 1: Math operations")
-    #     print("="*60)
-    #     math_response = await agent.ainvoke({
-    #         "messages": [{
-    #             "role": "user",
-    #             "content": "First add 3 and 5. Then multiply the result by 12. Use tools step by step."
-    #         }]
-    #     })
-    #     print("✅ Math Response:", math_response["messages"][-1].content)
-    # except Exception as e:
-    #     print(f"❌ Math error: {e}")
 
-    # # Test 2: Bright Data search
-    # try:
-    #     print("\n" + "="*60)
-    #     print("🔍 Test 2: Bright Data search")
-    #     print("="*60)
-    #     bright_data_response = await agent.ainvoke({
-    #         "messages": [{
-    #             "role": "user",
-    #             "content": "Search for 'Tesla stock price' using the search_engine tool"
-    #         }]
-    #     })
-    #     print("✅ Bright Data Response:", bright_data_response["messages"][-1].content)
-    # except Exception as e:
-    #     print(f"❌ Bright Data error: {e}")
-
-    # # Test 3: Gmail
+    # Test 3: Gmail
     # try:
     #     print("\n" + "="*60)
     #     print("📧 Test 3: Gmail - Get latest emails")
@@ -126,7 +68,7 @@ async def run_agent():
     # except Exception as e:
     #     print(f"❌ Gmail error: {e}")
 
-    # # Test 4: Google Drive
+    # Test 4: Google Drive
     # try:
     #     print("\n" + "="*60)
     #     print("📁 Test 4: Google Drive - List files")
@@ -156,7 +98,7 @@ async def run_agent():
     # except Exception as e:
     #     print(f"❌ Calendar error: {e}")
 
-    # # Test 6: Complex multi-tool task
+    # Test 6: Complex multi-tool task
     # try:
     #     print("\n" + "="*60)
     #     print("🎯 Test 6: Complex task using multiple tools")
@@ -175,27 +117,6 @@ async def run_agent():
     #     print("✅ Complex Task Response:", complex_response["messages"][-1].content)
     # except Exception as e:
     #     print(f"❌ Complex task error: {e}")
-
-    # Test 7: Web Search
-
-    # Test 8: Github
-    try:
-        print('\n🐙 Testing GitHub...')
-        github_response = await agent.ainvoke({
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Be concise. Only list repository names briefly."
-                },
-                {
-                    "role": "user",
-                    "content": "find the top 3 most starred python repositories on github"
-                }
-            ]
-        })
-        print("✅ GitHub Response:", github_response["messages"][-1].content)
-    except Exception as e:
-        print(f"❌ GitHub error: {e}")
 
     print("\n" + "="*60)
     print("🎉 All tests completed!")
