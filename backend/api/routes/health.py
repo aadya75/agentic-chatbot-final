@@ -1,69 +1,70 @@
 # backend/api/routes/health.py
-
 from fastapi import APIRouter, Request
-from api.models.response import HealthResponse
-from core.config import settings
-from core.agent import agent_manager
+from typing import Dict, Any
 import time
+import logging
 
+from core.agent import agent_manager
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Module-level variable to track start time
+_start_time = time.time()
 
-@router.get("/health", response_model=HealthResponse)
-async def health_check(request: Request):
+@router.get("/health")
+async def health_check(request: Request) -> Dict[str, Any]:
     """
-    Health check endpoint.
+    Health check endpoint
     
-    Returns:
-        - API status
-        - Uptime
-        - MCP server statuses
-        
-    Frontend can poll this to show system status.
+    Returns system status, uptime, and MCP server status
     """
-    # Calculate uptime
-    start_time = request.app.state.start_time
-    uptime = time.time() - start_time
+    current_time = time.time()
+    uptime = current_time - _start_time
     
-    # Check MCP server statuses
+    # Get MCP server status
     mcp_servers = {}
     if agent_manager.is_initialized:
         # Check which servers are configured
-        if settings.enable_gmail:
-            mcp_servers["gmail"] = "active" if agent_manager.mcp_client else "inactive"
-        if settings.enable_google_drive:
-            mcp_servers["google_drive"] = "active" if agent_manager.mcp_client else "inactive"
-        if settings.enable_google_calendar:
-            mcp_servers["google_calendar"] = "active" if agent_manager.mcp_client else "inactive"
-    else:
-        mcp_servers = {"status": "not_initialized"}
+        if agent_manager._server_config:
+            for server_name in agent_manager._server_config.keys():
+                mcp_servers[server_name] = {
+                    "status": "connected" if agent_manager.is_initialized else "disconnected",
+                    "tool_count": len([t for t in agent_manager.tools if server_name in t.name.lower()])
+                }
     
-    return HealthResponse(
-        status="healthy",
-        version=settings.app_version,
-        uptime_seconds=uptime,
-        mcp_servers=mcp_servers
-    )
+    return {
+        "status": "healthy",
+        "timestamp": current_time,
+        "uptime_seconds": round(uptime, 2),
+        "agent_initialized": agent_manager.is_initialized,
+        "mcp_servers": mcp_servers,
+        "active_threads": agent_manager.get_active_thread_count(),
+        "total_threads": agent_manager.get_thread_count(),
+        "total_tools": len(agent_manager.tools) if agent_manager.is_initialized else 0,
+        "version": "1.0.0"
+    }
 
-
-@router.get("/health/ready")
-async def readiness_check():
+@router.get("/status")
+async def detailed_status() -> Dict[str, Any]:
     """
-    Kubernetes-style readiness check.
-    
-    Returns 200 only if agent is ready to handle requests.
+    Detailed status endpoint with more information
     """
-    if agent_manager.is_initialized:
-        return {"status": "ready"}
-    else:
-        return {"status": "not_ready"}, 503
-
-
-@router.get("/health/live")
-async def liveness_check():
-    """
-    Kubernetes-style liveness check.
-    
-    Returns 200 if server is running (even if not fully initialized).
-    """
-    return {"status": "alive"}
+    return {
+        "agent": {
+            "initialized": agent_manager.is_initialized,
+            "llm_model": agent_manager.llm.model_name if agent_manager.llm else None,
+            "tools_loaded": len(agent_manager.tools),
+        },
+        "threads": {
+            "active": agent_manager.get_active_thread_count(),
+            "total": agent_manager.get_thread_count(),
+        },
+        "mcp_servers": {
+            name: {
+                "enabled": True,
+                "tool_count": len([t for t in agent_manager.tools if name in t.name.lower()])
+            }
+            for name in agent_manager._server_config.keys()
+        } if agent_manager._server_config else {}
+    }

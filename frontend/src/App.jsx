@@ -1,35 +1,40 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import React, { useState, useRef } from 'react'
+// Import the chat UI components (they must exist in ./components)
+import ChatBox from './Components/ChatBox';
+import MessageInput from './Components/MessageInput';
+import ChatContainer from './Components/ChatContainer'; // optional styling for the chat layout
 
-function App() {
-  const [count, setCount] = useState(0)
+export default function App() {
+  // ---- State & logic -------------------------------------------------
+  const [messages, setMessages] = useState([]);
+  const scrollRef = useRef(null);
+
+  // Add a message to the list (user or bot)
+  const addMessage = (text, isUser = true) => {
+    const newMessage = { id: Date.now(), text, isUser };
+    setMessages(prev => [...prev, newMessage]);
+
+    // Auto‑scroll to the newest message
+    if (scrollRef?.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  };
+
+  // Simulated bot reply – replace with real LLM/API call later
+  const handleUserMessage = (userText) => {
+    addMessage(userText, true);
+    const botReply = `You said: "${userText}" – processing...`;
+    setTimeout(() => addMessage(botReply, false), 600);
+  };
+  // --------------------------------------------------------------------
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
-}
+    <div className="chat-container">
+      {/* Message history (scrollable) */}
+      <ChatBox messages={messages} ref={scrollRef} />
 
-export default App
+      {/* Input area for new messages */}
+      <MessageInput onSend={handleUserMessage} />
+    </div>
+  );
+}

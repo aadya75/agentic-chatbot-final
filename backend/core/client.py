@@ -15,6 +15,7 @@ MCP_SERVERS_DIR = BACKEND_DIR / 'mcp_servers'
 # Load API keys from environment variables
 API_TOKEN = os.getenv("API_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 print(f"✅ API keys loaded")
 print(f"   Bright Data (API_TOKEN): {'✓' if API_TOKEN else '✗ MISSING'}")
@@ -40,7 +41,15 @@ async def run_agent():
         #     "command": "python",
         #     "args": [str(MCP_SERVERS_DIR / "google_calendar_server.py")],
         #     "transport": "stdio",
-        # }
+        # },
+        "github": {
+            "command": "python",
+            "args": [str(MCP_SERVERS_DIR / "github_server.py")],
+            "transport": "stdio",
+            "env": {
+                "GITHUB_TOKEN": GITHUB_TOKEN
+            }
+        }
     })
     print("✅ Client created with all servers")
     
@@ -52,20 +61,20 @@ async def run_agent():
     agent = create_agent(llm, tools)
     print("✅ Agent created")
 
-    # Test 3: Gmail
-    try:
-        print("\n" + "="*60)
-        print("📧 Test 3: Gmail - Get latest emails")
-        print("="*60)
-        gmail_response = await agent.ainvoke({
-            "messages": [{
-                "role": "user",
-                "content": "Get my 3 latest emails from inbox"
-            }]
-        })
-        print("✅ Gmail Response:", gmail_response["messages"][-1].content)
-    except Exception as e:
-        print(f"❌ Gmail error: {e}")
+   # Test 3: Gmail
+    # try:
+    #     print("\n" + "="*60)
+    #     print("📧 Test 3: Gmail - Get latest emails")
+    #     print("="*60)
+    #     gmail_response = await agent.ainvoke({
+    #         "messages": [{
+    #             "role": "user",
+    #             "content": "Get my 3 latest emails from inbox"
+    #         }]
+    #     })
+    #     print("✅ Gmail Response:", gmail_response["messages"][-1].content)
+    # except Exception as e:
+    #     print(f"❌ Gmail error: {e}")
 
     # Test 4: Google Drive
     # try:
@@ -82,7 +91,7 @@ async def run_agent():
     # except Exception as e:
     #     print(f"❌ Drive error: {e}")
 
-    # Test 5: Google Calendar
+    # # Test 5: Google Calendar
     # try:
     #     print("\n" + "="*60)
     #     print("📅 Test 5: Google Calendar - Upcoming events")
@@ -90,9 +99,7 @@ async def run_agent():
     #     calendar_response = await agent.ainvoke({
     #         "messages": [{
     #             "role": "user",
-    #             "content": "Create an event for meeting at 5pm , 10th jan 2026 in google calendar
-                
-    #             "
+    #             "content": "Show me my upcoming calendar events for the next 3 days"
     #         }]
     #     })
     #     print("✅ Calendar Response:", calendar_response["messages"][-1].content)
@@ -118,6 +125,21 @@ async def run_agent():
     #     print("✅ Complex Task Response:", complex_response["messages"][-1].content)
     # except Exception as e:
     #     print(f"❌ Complex task error: {e}")
+
+    # Test 7: GitHub - List repositories
+    try:
+        print("\n" + "="*60)
+        print("🐙 Test 7: GitHub - List repositories")
+        print("="*60)
+        github_response = await agent.ainvoke({
+            "messages": [{
+                "role": "user",
+                "content": "List my public GitHub repositories"
+            }]
+        })
+        print("✅ GitHub Response:", github_response["messages"][-1].content)
+    except Exception as e:
+        print(f"❌ GitHub error: {e}")
 
     print("\n" + "="*60)
     print("🎉 All tests completed!")
