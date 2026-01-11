@@ -96,16 +96,6 @@ class AgentManager:
         )
         logger.info(f"✅ LLM initialized: {settings.llm_model}")
         
-        # Check if tools should be enabled
-        if not settings.use_agent_with_tools:
-            logger.warning("⚠️  Tool usage is DISABLED in settings")
-            logger.info("   The agent will run without MCP tools to avoid hallucination errors")
-            self.tools = []
-            self.agent = create_agent(self.llm, [])
-            self._initialized = True
-            logger.info("🎉 Agent Manager initialization complete (without tools)\n")
-            return
-        
         # Step 2: Configure MCP servers based on settings
         self._configure_servers()
         
@@ -132,6 +122,7 @@ class AgentManager:
             self.tools = []
         
         # Step 5: Create agent with tools
+        # Important: Only create agent with tools if we have them
         if self.tools:
             try:
                 self.agent = create_agent(self.llm, self.tools)
@@ -140,7 +131,6 @@ class AgentManager:
                 logger.error(f"❌ Failed to create agent with tools: {e}")
                 logger.info("   Creating agent without tools...")
                 self.agent = create_agent(self.llm, [])
-                self.tools = []
         else:
             self.agent = create_agent(self.llm, [])
             logger.info("✅ Agent created without tools")
@@ -322,87 +312,49 @@ class AgentManager:
             # Get conversation history
             history = self.get_messages(thread_id)
             
-            # Build messages for agent
+            # Build messages for agent (all messages in thread)
             agent_messages = []
-            
-            # Add system message with tool instructions if we have tools
-            if self.tools:
-                tool_names = [tool.name for tool in self.tools]
-                system_msg = f"""You are a helpful AI assistant. 
-
-IMPORTANT: You have access to the following tools ONLY:
-{', '.join(tool_names)}
-
-Do NOT attempt to use any other tools like 'brave_search', 'web_search', 'google_search', etc. 
-If you don't have a tool for something, just answer based on your knowledge.
-If a user asks about something that would require a tool you don't have, politely explain that you don't have access to that capability."""
-                
-                agent_messages.append({
-                    "role": "system",
-                    "content": system_msg
-                })
-            
-            # Add conversation history
             for msg in history:
                 agent_messages.append({
                     "role": msg["role"],
                     "content": msg["content"]
                 })
             
-            logger.info(f"Processing message with {len(self.tools)} available tools: {[t.name for t in self.tools]}")
+            logger.info(f"Processing message with {len(self.tools)} available tools")
             
-            # Try with agent first
-            final_message = None
-            tools_used = []
-            
+            # Invoke agent with conversation history
+            # The agent will automatically use tools if needed
             try:
-                if self.tools and self.agent:
-                    response = await self.agent.ainvoke({
-                        "messages": agent_messages
-                    })
-                    final_message = response["messages"][-1].content
-                    
-                    # Track tools used
-                    if "intermediate_steps" in response:
-                        tools_used = [step.tool for step in response["intermediate_steps"] if hasattr(step, 'tool')]
+                response = await self.agent.ainvoke({
+                    "messages": agent_messages
+                })
+            except Exception as e:
+                logger.error(f"Agent invocation error: {e}")
+                # If tool-related error, try without agent (direct LLM)
+                if "tool" in str(e).lower() or "function" in str(e).lower():
+                    logger.warning("Tool error detected, falling back to direct LLM call")
+                    from langchain.schema import HumanMessage
+                    llm_response = await self.llm.ainvoke([HumanMessage(content=message)])
+                    response = {
+                        "messages": [llm_response]
+                    }
                 else:
-                    # No tools, use direct LLM
-                    from langchain.schema import HumanMessage, SystemMessage
-                    llm_messages = []
-                    for msg in agent_messages:
-                        if msg["role"] == "system":
-                            llm_messages.append(SystemMessage(content=msg["content"]))
-                        elif msg["role"] == "user":
-                            llm_messages.append(HumanMessage(content=msg["content"]))
-                    
-                    llm_response = await self.llm.ainvoke(llm_messages)
-                    final_message = llm_response.content
-                    
-            except Exception as agent_error:
-                error_str = str(agent_error).lower()
-                logger.error(f"Agent error: {agent_error}")
-                
-                # Check if it's a tool hallucination error
-                if any(keyword in error_str for keyword in ['tool', 'function', 'validation', 'brave_search', 'web_search']):
-                    logger.warning("⚠️  Tool hallucination detected! Falling back to direct LLM without tools...")
-                    
-                    # Use direct LLM call
-                    from langchain.schema import HumanMessage, SystemMessage
-                    fallback_messages = [
-                        SystemMessage(content="You are a helpful AI assistant. Answer based on your knowledge. You do not have access to any external tools or search capabilities."),
-                        HumanMessage(content=message)
-                    ]
-                    
-                    llm_response = await self.llm.ainvoke(fallback_messages)
-                    final_message = llm_response.content
-                else:
-                    # Non-tool error, re-raise
                     raise
             
             execution_time = time.time() - start_time
             
+            # Extract response content
+            final_message = response["messages"][-1].content
+            
             # Add assistant response to thread
             self.add_message(thread_id, "assistant", final_message)
+            
+            # Track which tools were used
+            tools_used = []
+            if "intermediate_steps" in response:
+                for step in response["intermediate_steps"]:
+                    if hasattr(step, 'tool'):
+                        tools_used.append(step.tool)
             
             return {
                 "message": final_message,
