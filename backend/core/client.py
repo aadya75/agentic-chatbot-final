@@ -27,11 +27,11 @@ async def run_agent():
 
     # Configure all MCP servers
     client = MultiServerMCPClient({
-        # "gmail": {
-        #     "command": "python",
-        #     "args": [str(MCP_SERVERS_DIR / "gmail_server.py")],
-        #     "transport": "stdio",
-        # },
+        "gmail": {
+            "command": "python",
+            "args": [str(MCP_SERVERS_DIR / "gmail_server.py")],
+            "transport": "stdio",
+        },
         # "google_drive": {
         #     "command": "python",
         #     "args": [str(MCP_SERVERS_DIR / "google_drive_server.py")],

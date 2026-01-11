@@ -1,0 +1,118 @@
+agentic-chatbot/
+│
+├── backend/
+│   ├── mcp_servers/                    # All MCP servers
+│   │   ├── __init__.py
+│   │   ├── gmail_server.py
+│   │   ├── google_drive_server.py
+│   │   ├── google_calendar_server.py
+│   │   
+│   │
+│   ├── core/                           # Core backend logic
+│   │   ├── __init__.py
+│   │   ├── agent.py                    # Agent initialization and management
+│   │   ├── mcp_client.py               # MCP client wrapper
+│   │   └── config.py                   # Configuration management
+│   │
+│   ├── api/                            # FastAPI application
+│   │   ├── __init__.py
+│   │   ├── main.py                     # FastAPI app entry point
+│   │   ├── routes/
+│   │   │   ├── __init__.py
+│   │   │   ├── chat.py                 # Chat endpoints
+│   │   │   ├── health.py               # Health check endpoints
+│   │   │   └── tools.py                # Tool management endpoints
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   ├── request.py              # Request models
+│   │   │   └── response.py             # Response models
+│   │   └── middleware/
+│   │       ├── __init__.py
+│   │       ├── cors.py                 # CORS middleware
+│   │       
+│   │
+│   ├── utils/                          # Utility functions
+│   │   ├── __init__.py
+│   │   ├── logger.py                   # Logging configuration
+│   │   └── performance.py              # Performance monitoring
+│   │
+│   ├── credentials/                    # Google OAuth credentials
+│   │   ├── .gitkeep
+│   │   ├── credentials.json            # (gitignored)
+│   │   └── token.json                  # (gitignored)
+│   │
+│   ├── scripts/                        # Setup and utility scripts
+│   │   ├── generate_tokens.py          # Google OAuth token generation
+│   │   ├── test_servers.py             # Test individual MCP servers
+│   │   └── setup.py                    # Initial setup script
+│   │
+│   ├── .env                            # Environment variables (gitignored)
+│   ├── .env.example                    # Example environment variables
+│   ├── requirements.txt                # Python dependencies
+│   └── README.md                       # Backend documentation
+│
+├── frontend/
+│   ├── public/
+│   │   ├── index.html
+│   │   ├── favicon.ico
+│   │   └── manifest.json
+│   │
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── Chat/
+│   │   │   │   ├── ChatContainer.jsx
+│   │   │   │   ├── ChatMessage.jsx
+│   │   │   │   ├── ChatInput.jsx
+│   │   │   │   └── ChatHeader.jsx
+│   │   │   ├── Sidebar/
+│   │   │   │   ├── Sidebar.jsx
+│   │   │   │   ├── ServerStatus.jsx
+│   │   │   │   └── ToolsList.jsx
+│   │   │   ├── Layout/
+│   │   │   │   ├── MainLayout.jsx
+│   │   │   │   ├── Header.jsx
+│   │   │   │   └── Footer.jsx
+│   │   │   └── Common/
+│   │   │       ├── LoadingSpinner.jsx
+│   │   │       ├── ErrorBoundary.jsx
+│   │   │       └── Button.jsx
+│   │   │
+│   │   ├── hooks/
+│   │   │   ├── useChat.js              # Custom hook for chat logic
+│   │   │   ├── useWebSocket.js         # WebSocket connection
+│   │   │   └── useTools.js             # Tool management
+│   │   │
+│   │   ├── services/
+│   │   │   ├── api.js                  # API service layer
+│   │   │   ├── chatService.js          # Chat-specific API calls
+│   │   │   └── websocket.js            # WebSocket service
+│   │   │
+│   │   ├── context/
+│   │   │   ├── ChatContext.jsx         # Global chat state
+│   │   │   └── ThemeContext.jsx        # Theme management
+│   │   │
+│   │   ├── utils/
+│   │   │   ├── formatters.js           # Message formatting
+│   │   │   └── validators.js           # Input validation
+│   │   │
+│   │   ├── styles/
+│   │   │   ├── globals.css
+│   │   │   ├── variables.css
+│   │   │   └── components/
+│   │   │       ├── chat.css
+│   │   │       └── sidebar.css
+│   │   │
+│   │   ├── App.jsx                     # Main App component
+│   │   ├── index.jsx                   # React entry point
+│   │   └── config.js                   # Frontend configuration
+│   │
+│   ├── .env                            # Frontend env variables (gitignored)
+│   ├── .env.example                    # Example frontend env variables
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── vite.config.js                  # or webpack.config.js
+│   └── README.md                       # Frontend documentation
+│
+│
+├── .gitignore                          # Git ignore file
+├── README.md                           # Project overview
