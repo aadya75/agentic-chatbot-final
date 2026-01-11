@@ -1,33 +1,43 @@
 # backend/core/agent.py
 
 import asyncio
+import uuid
+from datetime import datetime
 from typing import AsyncGenerator, Dict, List, Optional, Any
 from langchain_groq import ChatGroq
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain.agents import create_agent
 from pathlib import Path
 import time
-import uuid
+import logging
 
 from core.config import settings
 from api.models.response import ChatChunk, ToolInfo
 
+logger = logging.getLogger(__name__)
+
 
 class AgentManager:
     """
-    Manages the LangChain agent lifecycle.
+    Manages the LangChain agent lifecycle AND conversation threads.
     
-    Why a class? Encapsulates state management and provides
-    clean interface for starting, stopping, and using the agent.
+    Combines agent functionality with thread/conversation management.
     """
     
     def __init__(self):
+        # Agent-related attributes
         self.llm: Optional[ChatGroq] = None
         self.mcp_client: Optional[MultiServerMCPClient] = None
         self.agent = None
         self.tools: List = []
         self._initialized: bool = False
         self._server_config: Dict[str, Dict] = {}
+        
+        # Thread management attributes
+        self.threads: Dict[str, dict] = {}
+        self.active_threads: set = set()
+        
+        logger.info("AgentManager instance created")
     
     async def initialize(self):
         """
@@ -36,10 +46,10 @@ class AgentManager:
         This is async because MCP server connections can take time.
         """
         if self._initialized:
-            print("⚠️  Agent already initialized")
+            logger.warning("Agent already initialized")
             return
         
-        print("🚀 Initializing Agent Manager...")
+        logger.info("🚀 Initializing Agent Manager...")
         
         # Step 1: Initialize LLM
         self.llm = ChatGroq(
@@ -48,29 +58,49 @@ class AgentManager:
             max_tokens=settings.llm_max_tokens,
             api_key=settings.groq_api_key
         )
-        print(f"✅ LLM initialized: {settings.llm_model}")
+        logger.info(f"✅ LLM initialized: {settings.llm_model}")
         
         # Step 2: Configure MCP servers based on settings
         self._configure_servers()
         
         # Step 3: Initialize MCP client with configured servers
         if self._server_config:
-            self.mcp_client = MultiServerMCPClient(self._server_config)
-            print(f"✅ MCP Client created with {len(self._server_config)} servers")
-            
-            # Step 4: Load tools from all servers
-            self.tools = await self.mcp_client.get_tools()
-            print(f"✅ Loaded {len(self.tools)} tools")
-            
-            # Step 5: Create agent with tools
-            self.agent = create_agent(self.llm, self.tools)
-            print("✅ Agent created successfully")
+            try:
+                self.mcp_client = MultiServerMCPClient(self._server_config)
+                logger.info(f"✅ MCP Client created with {len(self._server_config)} servers")
+                
+                # Step 4: Load tools from all servers
+                self.tools = await self.mcp_client.get_tools()
+                logger.info(f"✅ Loaded {len(self.tools)} tools")
+                
+                # Log tool names for debugging
+                for tool in self.tools:
+                    logger.info(f"   📌 Tool: {tool.name}")
+                
+            except Exception as e:
+                logger.warning(f"⚠️  Warning: Failed to initialize MCP tools: {e}")
+                logger.info("   Continuing without MCP tools...")
+                self.tools = []
         else:
-            print("⚠️  No MCP servers enabled")
+            logger.warning("⚠️  No MCP servers enabled")
+            self.tools = []
+        
+        # Step 5: Create agent with tools
+        # Important: Only create agent with tools if we have them
+        if self.tools:
+            try:
+                self.agent = create_agent(self.llm, self.tools)
+                logger.info("✅ Agent created successfully with tools")
+            except Exception as e:
+                logger.error(f"❌ Failed to create agent with tools: {e}")
+                logger.info("   Creating agent without tools...")
+                self.agent = create_agent(self.llm, [])
+        else:
             self.agent = create_agent(self.llm, [])
+            logger.info("✅ Agent created without tools")
         
         self._initialized = True
-        print("🎉 Agent Manager initialization complete!\n")
+        logger.info("🎉 Agent Manager initialization complete!\n")
     
     def _configure_servers(self):
         """
@@ -78,7 +108,7 @@ class AgentManager:
         
         This allows easy enable/disable of servers via environment variables.
         """
-        servers_dir = settings.mcp_servers_dir
+        servers_dir = Path(__file__).resolve().parent.parent / 'mcp_servers'
         
         if settings.enable_gmail:
             self._server_config["gmail"] = {
@@ -86,7 +116,7 @@ class AgentManager:
                 "args": [str(servers_dir / "gmail_server.py")],
                 "transport": "stdio",
             }
-            print("  📧 Gmail server enabled")
+            logger.info("  📧 Gmail server enabled")
         
         if settings.enable_google_drive:
             self._server_config["google_drive"] = {
@@ -94,7 +124,7 @@ class AgentManager:
                 "args": [str(servers_dir / "google_drive_server.py")],
                 "transport": "stdio",
             }
-            print("  📁 Google Drive server enabled")
+            logger.info("  📁 Google Drive server enabled")
         
         if settings.enable_google_calendar:
             self._server_config["google_calendar"] = {
@@ -102,31 +132,125 @@ class AgentManager:
                 "args": [str(servers_dir / "google_calendar_server.py")],
                 "transport": "stdio",
             }
-            print("  📅 Google Calendar server enabled")
+            logger.info("  📅 Google Calendar server enabled")
     
     async def shutdown(self):
         """Gracefully shutdown agent and close connections"""
-        print("🛑 Shutting down Agent Manager...")
+        logger.info("🛑 Shutting down Agent Manager...")
         if self.mcp_client:
-            # MCP client cleanup (if it has a close method)
             try:
                 await self.mcp_client.close()
             except AttributeError:
-                pass  # Client might not have close method
+                pass
         self._initialized = False
-        print("✅ Agent Manager shutdown complete")
+        logger.info("✅ Agent Manager shutdown complete")
+    
+    # ========== THREAD MANAGEMENT METHODS ==========
+    
+    def create_thread(self) -> str:
+        """
+        Create a new conversation thread
+        
+        Returns:
+            str: The new thread ID
+        """
+        thread_id = str(uuid.uuid4())
+        
+        self.threads[thread_id] = {
+            "id": thread_id,
+            "created_at": datetime.utcnow().isoformat(),
+            "messages": [],
+            "metadata": {},
+            "status": "active"
+        }
+        
+        self.active_threads.add(thread_id)
+        
+        logger.info(f"Created new thread: {thread_id}")
+        return thread_id
+    
+    def get_thread(self, thread_id: str) -> Optional[dict]:
+        """Get a thread by ID"""
+        return self.threads.get(thread_id)
+    
+    def delete_thread(self, thread_id: str) -> bool:
+        """Delete a thread"""
+        if thread_id in self.threads:
+            del self.threads[thread_id]
+            self.active_threads.discard(thread_id)
+            logger.info(f"Deleted thread: {thread_id}")
+            return True
+        return False
+    
+    def list_threads(self) -> List[dict]:
+        """List all threads"""
+        return [
+            {
+                "id": thread_id,
+                "created_at": thread_data["created_at"],
+                "message_count": len(thread_data["messages"]),
+                "status": thread_data["status"]
+            }
+            for thread_id, thread_data in self.threads.items()
+        ]
+    
+    def add_message(self, thread_id: str, role: str, content: str, metadata: Optional[dict] = None) -> bool:
+        """Add a message to a thread"""
+        thread = self.threads.get(thread_id)
+        if not thread:
+            logger.warning(f"Thread not found: {thread_id}")
+            return False
+        
+        message = {
+            "id": str(uuid.uuid4()),
+            "role": role,
+            "content": content,
+            "timestamp": datetime.utcnow().isoformat(),
+            "metadata": metadata or {}
+        }
+        
+        thread["messages"].append(message)
+        logger.debug(f"Added message to thread {thread_id}")
+        return True
+    
+    def get_messages(self, thread_id: str) -> List[dict]:
+        """Get all messages from a thread"""
+        thread = self.threads.get(thread_id)
+        if not thread:
+            return []
+        return thread["messages"]
+    
+    def clear_thread(self, thread_id: str) -> bool:
+        """Clear all messages from a thread"""
+        thread = self.threads.get(thread_id)
+        if not thread:
+            return False
+        
+        thread["messages"] = []
+        logger.info(f"Cleared messages from thread: {thread_id}")
+        return True
+    
+    def get_thread_count(self) -> int:
+        """Get total number of threads"""
+        return len(self.threads)
+    
+    def get_active_thread_count(self) -> int:
+        """Get number of active threads"""
+        return len(self.active_threads)
+    
+    # ========== CHAT METHODS WITH THREAD SUPPORT ==========
     
     async def chat(
         self, 
         message: str, 
-        conversation_id: Optional[str] = None
+        thread_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Send a message to the agent and get complete response.
         
         Args:
             message: User's message
-            conversation_id: Optional conversation ID for context
+            thread_id: Optional thread ID for conversation context
         
         Returns:
             Dict with response message, tools used, and metadata
@@ -134,26 +258,63 @@ class AgentManager:
         if not self._initialized:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
         
+        # Create thread if not provided
+        if not thread_id:
+            thread_id = self.create_thread()
+        
+        # Verify thread exists
+        thread = self.get_thread(thread_id)
+        if not thread:
+            raise ValueError(f"Thread not found: {thread_id}")
+        
         start_time = time.time()
-        conversation_id = conversation_id or f"conv_{uuid.uuid4().hex[:8]}"
+        
+        # Add user message to thread
+        self.add_message(thread_id, "user", message)
         
         try:
-            # Invoke agent with user message
-            response = await self.agent.ainvoke({
-                "messages": [{
-                    "role": "user",
-                    "content": message
-                }]
-            })
+            # Get conversation history
+            history = self.get_messages(thread_id)
+            
+            # Build messages for agent (all messages in thread)
+            agent_messages = []
+            for msg in history:
+                agent_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            logger.info(f"Processing message with {len(self.tools)} available tools")
+            
+            # Invoke agent with conversation history
+            # The agent will automatically use tools if needed
+            try:
+                response = await self.agent.ainvoke({
+                    "messages": agent_messages
+                })
+            except Exception as e:
+                logger.error(f"Agent invocation error: {e}")
+                # If tool-related error, try without agent (direct LLM)
+                if "tool" in str(e).lower() or "function" in str(e).lower():
+                    logger.warning("Tool error detected, falling back to direct LLM call")
+                    from langchain.schema import HumanMessage
+                    llm_response = await self.llm.ainvoke([HumanMessage(content=message)])
+                    response = {
+                        "messages": [llm_response]
+                    }
+                else:
+                    raise
             
             execution_time = time.time() - start_time
             
             # Extract response content
             final_message = response["messages"][-1].content
             
-            # Track which tools were used (if available in response)
+            # Add assistant response to thread
+            self.add_message(thread_id, "assistant", final_message)
+            
+            # Track which tools were used
             tools_used = []
-            # LangGraph might include tool calls in intermediate steps
             if "intermediate_steps" in response:
                 for step in response["intermediate_steps"]:
                     if hasattr(step, 'tool'):
@@ -161,7 +322,7 @@ class AgentManager:
             
             return {
                 "message": final_message,
-                "conversation_id": conversation_id,
+                "thread_id": thread_id,
                 "message_id": f"msg_{uuid.uuid4().hex[:8]}",
                 "tools_used": tools_used,
                 "execution_time": execution_time,
@@ -172,19 +333,16 @@ class AgentManager:
         
         except Exception as e:
             execution_time = time.time() - start_time
-            print(f"❌ Error during chat: {e}")
+            logger.error(f"❌ Error during chat: {e}")
             raise
     
     async def stream_chat(
         self, 
         message: str, 
-        conversation_id: Optional[str] = None
+        thread_id: Optional[str] = None
     ) -> AsyncGenerator[ChatChunk, None]:
         """
-        Stream agent response token by token.
-        
-        This is more complex but provides better UX - user sees
-        response appearing in real-time like ChatGPT.
+        Stream agent response token by token with thread support.
         
         Yields:
             ChatChunk objects with incremental response data
@@ -192,65 +350,90 @@ class AgentManager:
         if not self._initialized:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
         
-        conversation_id = conversation_id or f"conv_{uuid.uuid4().hex[:8]}"
+        # Create thread if not provided
+        if not thread_id:
+            thread_id = self.create_thread()
+        
+        # Verify thread exists
+        thread = self.get_thread(thread_id)
+        if not thread:
+            raise ValueError(f"Thread not found: {thread_id}")
+        
+        # Add user message to thread
+        self.add_message(thread_id, "user", message)
         
         try:
-            # LangChain streaming
+            # Get conversation history
+            history = self.get_messages(thread_id)
+            
+            # Build messages for agent
+            agent_messages = []
+            for msg in history[:-1]:  # Exclude last message
+                agent_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            agent_messages.append({
+                "role": "user",
+                "content": message
+            })
+            
+            # Accumulate response for storing in thread
+            full_response = ""
+            
+            # Stream from agent
             async for chunk in self.agent.astream({
-                "messages": [{
-                    "role": "user",
-                    "content": message
-                }]
+                "messages": agent_messages
             }):
-                # Different chunk types based on agent state
                 if "messages" in chunk:
-                    # Final message
                     content = chunk["messages"][-1].content
                     if content:
+                        full_response += content
                         yield ChatChunk(
                             type="token",
                             content=content,
-                            metadata={"conversation_id": conversation_id}
+                            metadata={"thread_id": thread_id}
                         )
                 
                 elif "tools" in chunk:
-                    # Tool being called
                     tool_call = chunk["tools"]
                     yield ChatChunk(
                         type="tool_call",
                         tool_name=tool_call.get("name"),
                         tool_input=tool_call.get("args"),
-                        metadata={"conversation_id": conversation_id}
+                        metadata={"thread_id": thread_id}
                     )
                 
                 elif "tool_result" in chunk:
-                    # Tool result received
                     yield ChatChunk(
                         type="tool_result",
                         tool_output=chunk["tool_result"],
-                        metadata={"conversation_id": conversation_id}
+                        metadata={"thread_id": thread_id}
                     )
+            
+            # Add complete assistant response to thread
+            if full_response:
+                self.add_message(thread_id, "assistant", full_response)
             
             # Send completion signal
             yield ChatChunk(
                 type="done",
-                metadata={"conversation_id": conversation_id}
+                metadata={"thread_id": thread_id}
             )
         
         except Exception as e:
-            print(f"❌ Error during streaming: {e}")
+            logger.error(f"❌ Error during streaming: {e}")
             yield ChatChunk(
                 type="error",
                 content=str(e),
-                metadata={"conversation_id": conversation_id}
+                metadata={"thread_id": thread_id}
             )
     
+    # ========== TOOL INFORMATION METHODS ==========
+    
     def get_tools_info(self) -> List[ToolInfo]:
-        """
-        Get information about all available tools.
-        
-        Useful for frontend to display capabilities.
-        """
+        """Get information about all available tools"""
         tools_info = []
         for tool in self.tools:
             tools_info.append(ToolInfo(

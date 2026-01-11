@@ -37,10 +37,18 @@ async def run_agent():
         #     "args": [str(MCP_SERVERS_DIR / "google_drive_server.py")],
         #     "transport": "stdio",
         # },
-        "google_calendar": {
+        # "google_calendar": {
+        #     "command": "python",
+        #     "args": [str(MCP_SERVERS_DIR / "google_calendar_server.py")],
+        #     "transport": "stdio",
+        # },
+        "github": {
             "command": "python",
-            "args": [str(MCP_SERVERS_DIR / "google_calendar_server.py")],
+            "args": [str(MCP_SERVERS_DIR / "github_server.py")],
             "transport": "stdio",
+            "env": {
+                "GITHUB_TOKEN": GITHUB_TOKEN
+            }
         }
     })
     print("✅ Client created with all servers")
@@ -53,7 +61,7 @@ async def run_agent():
     agent = create_agent(llm, tools)
     print("✅ Agent created")
 
-    # Test 3: Gmail
+   # Test 3: Gmail
     # try:
     #     print("\n" + "="*60)
     #     print("📧 Test 3: Gmail - Get latest emails")
@@ -117,6 +125,21 @@ async def run_agent():
     #     print("✅ Complex Task Response:", complex_response["messages"][-1].content)
     # except Exception as e:
     #     print(f"❌ Complex task error: {e}")
+
+    # Test 7: GitHub - List repositories
+    try:
+        print("\n" + "="*60)
+        print("🐙 Test 7: GitHub - List repositories")
+        print("="*60)
+        github_response = await agent.ainvoke({
+            "messages": [{
+                "role": "user",
+                "content": "List my public GitHub repositories"
+            }]
+        })
+        print("✅ GitHub Response:", github_response["messages"][-1].content)
+    except Exception as e:
+        print(f"❌ GitHub error: {e}")
 
     print("\n" + "="*60)
     print("🎉 All tests completed!")
