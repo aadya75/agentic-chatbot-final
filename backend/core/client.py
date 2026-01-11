@@ -26,21 +26,21 @@ async def run_agent():
 
     # Configure all MCP servers
     client = MultiServerMCPClient({
-        # "gmail": {
-        #     "command": "python",
-        #     "args": [str(MCP_SERVERS_DIR / "gmail_server.py")],
-        #     "transport": "stdio",
-        # },
+        "gmail": {
+            "command": "python",
+            "args": [str(MCP_SERVERS_DIR / "gmail_server.py")],
+            "transport": "stdio",
+        },
         # "google_drive": {
         #     "command": "python",
         #     "args": [str(MCP_SERVERS_DIR / "google_drive_server.py")],
         #     "transport": "stdio",
         # },
-        "google_calendar": {
-            "command": "python",
-            "args": [str(MCP_SERVERS_DIR / "google_calendar_server.py")],
-            "transport": "stdio",
-        }
+        # "google_calendar": {
+        #     "command": "python",
+        #     "args": [str(MCP_SERVERS_DIR / "google_calendar_server.py")],
+        #     "transport": "stdio",
+        # }
     })
     print("✅ Client created with all servers")
     
@@ -53,19 +53,19 @@ async def run_agent():
     print("✅ Agent created")
 
     # Test 3: Gmail
-    # try:
-    #     print("\n" + "="*60)
-    #     print("📧 Test 3: Gmail - Get latest emails")
-    #     print("="*60)
-    #     gmail_response = await agent.ainvoke({
-    #         "messages": [{
-    #             "role": "user",
-    #             "content": "Get my 3 latest emails from inbox"
-    #         }]
-    #     })
-    #     print("✅ Gmail Response:", gmail_response["messages"][-1].content)
-    # except Exception as e:
-    #     print(f"❌ Gmail error: {e}")
+    try:
+        print("\n" + "="*60)
+        print("📧 Test 3: Gmail - Get latest emails")
+        print("="*60)
+        gmail_response = await agent.ainvoke({
+            "messages": [{
+                "role": "user",
+                "content": "Get my 3 latest emails from inbox"
+            }]
+        })
+        print("✅ Gmail Response:", gmail_response["messages"][-1].content)
+    except Exception as e:
+        print(f"❌ Gmail error: {e}")
 
     # Test 4: Google Drive
     # try:
@@ -83,19 +83,21 @@ async def run_agent():
     #     print(f"❌ Drive error: {e}")
 
     # Test 5: Google Calendar
-    try:
-        print("\n" + "="*60)
-        print("📅 Test 5: Google Calendar - Upcoming events")
-        print("="*60)
-        calendar_response = await agent.ainvoke({
-            "messages": [{
-                "role": "user",
-                "content": "Show me my upcoming calendar events for the next 3 days"
-            }]
-        })
-        print("✅ Calendar Response:", calendar_response["messages"][-1].content)
-    except Exception as e:
-        print(f"❌ Calendar error: {e}")
+    # try:
+    #     print("\n" + "="*60)
+    #     print("📅 Test 5: Google Calendar - Upcoming events")
+    #     print("="*60)
+    #     calendar_response = await agent.ainvoke({
+    #         "messages": [{
+    #             "role": "user",
+    #             "content": "Create an event for meeting at 5pm , 10th jan 2026 in google calendar
+                
+    #             "
+    #         }]
+    #     })
+    #     print("✅ Calendar Response:", calendar_response["messages"][-1].content)
+    # except Exception as e:
+    #     print(f"❌ Calendar error: {e}")
 
     # Test 6: Complex multi-tool task
     # try:
