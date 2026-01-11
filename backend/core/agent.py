@@ -1,40 +1,4 @@
-async def initialize(self):
-        """
-        Initialize the agent and MCP servers.
-        
-        This is async because MCP server connections can take time.
-        """
-        if self._initialized:
-            logger.warning("Agent already initialized")
-            return
-        
-        logger.info("🚀 Initializing Agent Manager...")
-        
-        # Step 1: Initialize LLM with tool choice disabled by default
-        self.llm = ChatGroq(
-            model_name=settings.llm_model,
-            temperature=settings.llm_temperature,
-            max_tokens=settings.llm_max_tokens,
-            api_key=settings.groq_api_key,
-            model_kwargs={
-                "tool_choice": "auto"  # Let model choose, but only from provided tools
-            }
-        )
-        logger.info(f"✅ LLM initialized: {settings.llm_model}")
-        
-        # Step 2: Configure MCP servers based on settings
-        self._configure_servers()
-        
-        # Step 3: Initialize MCP client with configured servers
-        if self._server_config:
-            try:
-                self.mcp_client = MultiServerMCPClient(self._server_config)
-                logger.info(f"✅ MCP Client created with {len(self._server_config)} servers")
-            except Exception as e:
-                logger.warning(f"⚠️  Warning: Failed to initialize MCP client: {e}")
-                logger.info("   Continuing without MCP tools...")
-                
-                # Step 4: Load tools# backend/core/agent.py
+# backend/core/agent.py
 
 import asyncio
 import uuid
