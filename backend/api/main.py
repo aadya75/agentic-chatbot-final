@@ -1,128 +1,127 @@
-# backend/api/main.py
+# backend/main.py
+# REPLACE YOUR ENTIRE main.py WITH THIS
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+import logging
 import time
 
-from core.config import settings, validate_setup
-from core.agent import agent_manager
-from api.routes import chat, health, tools
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-
-# Lifespan context manager - runs code at startup and shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifespan events for FastAPI.
+    """Application lifespan manager"""
+    logger.info("🚀 Starting Agentic Chatbot Backend...")
     
-    Why? Ensures agent initializes before accepting requests
-    and cleans up properly on shutdown.
-    """
-    # Startup
-    print("\n" + "="*60)
-    print("🚀 Starting Agentic Chatbot API")
-    print("="*60 + "\n")
-    
-    # Validate configuration
-    validate_setup()
-    
-    # Initialize agent
-    await agent_manager.initialize()
-    
-    print("\n" + "="*60)
-    print(f"✅ Server ready on http://{settings.host}:{settings.port}")
-    print("="*60 + "\n")
-    
-    # Record start time for uptime tracking
+    # Set startup time in app state
     app.state.start_time = time.time()
     
-    yield  # Server runs here
+    # Import and initialize agent manager
+    from core.agent import agent_manager
     
-    # Shutdown
-    print("\n" + "="*60)
-    print("🛑 Shutting down Agentic Chatbot API")
-    print("="*60 + "\n")
+    try:
+        await agent_manager.initialize()
+        logger.info("✅ Backend initialized successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize agent manager: {e}")
+        logger.warning("⚠️  Continuing without agent - some features may not work")
     
-    await agent_manager.shutdown()
-
+    yield
+    
+    # Shutdown logic here
+    logger.info("🛑 Shutting down backend...")
+    try:
+        await agent_manager.shutdown()
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 # Create FastAPI app
 app = FastAPI(
-    title=settings.app_name,
-    version=settings.app_version,
-    description="AI agent with MCP server integration for Gmail, Drive, and Calendar",
-    lifespan=lifespan,
-    docs_url="/docs",  # Swagger UI at /docs
-    redoc_url="/redoc",  # ReDoc at /redoc
+    title="Agentic Chatbot API",
+    description="Backend API for the Agentic Chatbot",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-
-# CORS Middleware - allows frontend to call this API
+# CORS configuration - MUST be before routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,  # Which domains can access
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"]
 )
 
+# Import routes - AFTER app creation but BEFORE including them
+try:
+    from api.routes import health, chat
+    logger.info("✅ Routes imported successfully")
+except ImportError as e:
+    logger.error(f"❌ Failed to import routes: {e}")
+    logger.error("   Make sure api/routes/health.py and api/routes/chat.py exist")
+    raise
 
-# Global exception handler
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """
-    Catch all unhandled exceptions and return proper error response.
-    
-    Prevents server crashes and provides useful error messages.
-    """
-    print(f"❌ Unhandled exception: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={
-            "status": "error",
-            "error": {
-                "code": "INTERNAL_SERVER_ERROR",
-                "message": str(exc),
-                "details": {"type": type(exc).__name__}
-            }
-        }
-    )
+# Include routers with /api prefix
+app.include_router(health.router, prefix="/api", tags=["health"])
+app.include_router(chat.router, prefix="/api", tags=["chat"])
 
-
-# Include routers
-app.include_router(health.router, prefix="/api", tags=["Health"])
-app.include_router(chat.router, prefix="/api", tags=["Chat"])
-app.include_router(tools.router, prefix="/api", tags=["Tools"])
-
+logger.info("✅ Routes registered:")
+logger.info("   - /api/health")
+logger.info("   - /api/status")
+logger.info("   - /api/thread")
+logger.info("   - /api/thread/{thread_id}/chat")
 
 # Root endpoint
 @app.get("/")
-async def root():
-    """
-    Root endpoint - basic API information.
-    """
+async def root(request: Request):
+    """Root endpoint"""
+    start_time = getattr(request.app.state, 'start_time', time.time())
+    uptime = time.time() - start_time
     return {
-        "name": settings.app_name,
-        "version": settings.app_version,
+        "message": "Agentic Chatbot API",
         "status": "running",
-        "docs": "/docs",
-        "health": "/api/health"
+        "version": "1.0.0",
+        "uptime_seconds": round(uptime, 2),
+        "endpoints": {
+            "health": "/api/health",
+            "status": "/api/status",
+            "create_thread": "POST /api/thread",
+            "chat": "POST /api/thread/{thread_id}/chat"
+        }
     }
 
+# Debug endpoint to list all routes
+@app.get("/debug/routes")
+async def list_routes():
+    """List all registered routes"""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, 'methods'):
+            routes.append({
+                "path": route.path,
+                "methods": list(route.methods),
+                "name": route.name
+            })
+    return {"routes": routes}
 
 if __name__ == "__main__":
-    """
-    Run with: python -m backend.api.main
-    
-    For development, use: uvicorn backend.api.main:app --reload
-    """
     import uvicorn
+    logger.info("🚀 Starting server...")
     uvicorn.run(
-        "backend.api.main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.debug,
-        log_level=settings.log_level.lower()
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
     )
