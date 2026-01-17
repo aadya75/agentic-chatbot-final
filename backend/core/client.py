@@ -32,24 +32,30 @@ async def run_agent():
             "args": [str(MCP_SERVERS_DIR / "gmail_server.py")],
             "transport": "stdio",
         },
-        # "google_drive": {
-        #     "command": "python",
-        #     "args": [str(MCP_SERVERS_DIR / "google_drive_server.py")],
-        #     "transport": "stdio",
-        # },
-        # "google_calendar": {
-        #     "command": "python",
-        #     "args": [str(MCP_SERVERS_DIR / "google_calendar_server.py")],
-        #     "transport": "stdio",
-        # },
-        "github": {
+        "rag": {
             "command": "python",
-            "args": [str(MCP_SERVERS_DIR / "github_server.py")],
+            "args": [str(MCP_SERVERS_DIR / "rag_server.py")],
             "transport": "stdio",
-            "env": {
-                "GITHUB_TOKEN": GITHUB_TOKEN
-            }
-        }
+            "env": {}
+        },
+        "google_drive": {
+            "command": "python",
+            "args": [str(MCP_SERVERS_DIR / "google_drive_server.py")],
+            "transport": "stdio",
+        },
+        "google_calendar": {
+            "command": "python",
+            "args": [str(MCP_SERVERS_DIR / "google_calendar_server.py")],
+            "transport": "stdio",
+        },
+        # "github": {
+        #     "command": "python",
+        #     "args": [str(MCP_SERVERS_DIR / "github_server.py")],
+        #     "transport": "stdio",
+        #     "env": {
+        #         "GITHUB_TOKEN": GITHUB_TOKEN
+        #     }
+        # }
     })
     print("✅ Client created with all servers")
     
@@ -69,7 +75,7 @@ async def run_agent():
     #     gmail_response = await agent.ainvoke({
     #         "messages": [{
     #             "role": "user",
-    #             "content": "Get my 3 latest emails from inbox"
+    #             "content": "Schedule a meeting next week on monday for 5pm with the modiinaina@gmail.com about the project update."
     #         }]
     #     })
     #     print("✅ Gmail Response:", gmail_response["messages"][-1].content)
@@ -127,23 +133,23 @@ async def run_agent():
     #     print(f"❌ Complex task error: {e}")
 
     # Test 7: GitHub - List repositories
-    try:
-        print("\n" + "="*60)
-        print("🐙 Test 7: GitHub - List repositories")
-        print("="*60)
-        github_response = await agent.ainvoke({
-            "messages": [{
-                "role": "user",
-                "content": "List my public GitHub repositories"
-            }]
-        })
-        print("✅ GitHub Response:", github_response["messages"][-1].content)
-    except Exception as e:
-        print(f"❌ GitHub error: {e}")
+    # try:
+    #     print("\n" + "="*60)
+    #     print("🐙 Test 7: GitHub - List repositories")
+    #     print("="*60)
+    #     github_response = await agent.ainvoke({
+    #         "messages": [{
+    #             "role": "user",
+    #             "content": "List my public GitHub repositories"
+    #         }]
+    #     })
+    #     print("✅ GitHub Response:", github_response["messages"][-1].content)
+    # except Exception as e:
+    #     print(f"❌ GitHub error: {e}")
 
-    print("\n" + "="*60)
-    print("🎉 All tests completed!")
-    print("="*60)
+    # print("\n" + "="*60)
+    # print("🎉 All tests completed!")
+    # print("="*60)
 
 if __name__ == "__main__":
     asyncio.run(run_agent())

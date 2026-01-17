@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "gmail": {
+      "command": "python",
+      "args": [
+        "backend/mcp_servers/gmail_server.py"
+      ],
+      "env": {}
+    },
+    "google_drive": {
+      "command": "python",
+      "args": [
+        "backend/mcp_servers/google_drive_server.py"
+      ],
+      "env": {}
+    },
+    "google_calendar": {
+      "command": "python",
+      "args": [
+        "backend/mcp_servers/google_calendar_server.py"
+      ],
+      "env": {}
+    },
+    "research_rag": {
+      "command": "python",
+      "args": [
+        "backend/mcp_servers/research_rag_server.py"
+      ],
+      "env": {}
+    }
+  }
+}

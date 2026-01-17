@@ -1,11 +1,14 @@
 # backend/main.py
 # REPLACE YOUR ENTIRE main.py WITH THIS
 
+import os
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 import time
+
+from api.routes import knowledge
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,7 +68,7 @@ app.add_middleware(
 
 # Import routes - AFTER app creation but BEFORE including them
 try:
-    from api.routes import health, chat
+    from api.routes import health, chat , knowledge
     logger.info("✅ Routes imported successfully")
 except ImportError as e:
     logger.error(f"❌ Failed to import routes: {e}")
@@ -75,6 +78,7 @@ except ImportError as e:
 # Include routers with /api prefix
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(chat.router, prefix="/api", tags=["chat"])
+app.include_router(knowledge.router, prefix="/api", tags=["knowledge"])
 
 logger.info("✅ Routes registered:")
 logger.info("   - /api/health")
@@ -125,3 +129,14 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
+    
+# In startup event, add:
+@app.on_event("startup")
+async def startup_event():
+    # ... your existing startup code ...
+    
+    # ADD THESE LINES:
+    # Create data directories if they don't exist
+    os.makedirs(os.getenv('FAISS_INDEX_DIR', './data/indices'), exist_ok=True)
+    os.makedirs(os.getenv('UPLOAD_DIR', './data/uploads'), exist_ok=True)
+    print(f"Knowledge Base: {os.getenv('FAISS_INDEX_DIR', './data/indices')}")

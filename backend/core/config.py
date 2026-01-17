@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     enable_gmail: bool = True
     enable_google_drive: bool = True
     enable_google_calendar: bool = True
+    enable_rag: bool = True
     
     # Paths
     mcp_servers_dir: Path = MCP_SERVERS_DIR
