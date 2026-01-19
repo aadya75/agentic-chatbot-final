@@ -3,9 +3,15 @@ Neo4j Citation Graph Store (Optional)
 Manages citation relationships between papers
 """
 
+import logging
 from typing import List, Dict, Optional
 import os
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class GraphStore:
     """
@@ -43,9 +49,9 @@ class GraphStore:
             with self.driver.session(database=self.database) as session:
                 session.run("RETURN 1")
             self.enabled = True
-            print("Neo4j connection established")
+            logger.info("Neo4j connection established")
         except Exception as e:
-            print(f"Neo4j not available: {e}")
+            logger.warning(f"Neo4j not available: {e}")
             self.enabled = False
     
     def add_paper(self, paper_id: str, title: str = None, metadata: Dict = None):
@@ -70,7 +76,7 @@ class GraphStore:
                 """
                 session.run(query, paper_id=paper_id, title=title or paper_id, metadata=metadata or {})
         except Exception as e:
-            print(f"Error adding paper to graph: {e}")
+            logger.info(f"Error adding paper to graph: {e}")
     
     def add_citation(self, citing_paper_id: str, cited_paper_id: str):
         """
@@ -92,7 +98,7 @@ class GraphStore:
                 """
                 session.run(query, citing_id=citing_paper_id, cited_id=cited_paper_id)
         except Exception as e:
-            print(f"Error adding citation: {e}")
+            logger.info(f"Error adding citation: {e}")
     
     def get_citations(self, paper_id: str) -> Dict:
         """
@@ -128,7 +134,7 @@ class GraphStore:
                     'cites': cites
                 }
         except Exception as e:
-            print(f"Error getting citations: {e}")
+            logger.info(f"Error getting citations: {e}")
             return {'cited_by': [], 'cites': []}
     
     def delete_paper(self, paper_id: str):
@@ -149,7 +155,7 @@ class GraphStore:
                 """
                 session.run(query, paper_id=paper_id)
         except Exception as e:
-            print(f"Error deleting paper from graph: {e}")
+            logger.info(f"Error deleting paper from graph: {e}")
     
     def close(self):
         """Close the database connection"""

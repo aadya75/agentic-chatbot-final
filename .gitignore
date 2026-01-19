@@ -41,3 +41,8 @@ logs/
 # Testing
 .pytest_cache/
 coverage/
+
+faiss.index
+metadata.json
+db
+*.pdf

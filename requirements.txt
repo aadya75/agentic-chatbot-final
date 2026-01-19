@@ -6,7 +6,9 @@ pydantic-settings==2.1.0
 python-dotenv==1.0.0
 
 # LangChain and AI
-langchain==0.1.4
+langchain
+langgraph
+pydantic-settings
 langchain-groq==0.0.1
 langchain-mcp-adapters==0.1.0
 
@@ -31,3 +33,9 @@ pytest-asyncio==0.23.3
 black==24.1.1  # Code formatter
 flake8==7.0.0  # Linter
 mypy==1.8.0    # Type checker
+
+
+faiss-cpu
+numpy
+PyPDF2
+neo4j

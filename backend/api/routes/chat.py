@@ -45,7 +45,8 @@ async def send_message(request: ChatRequest):
         # Use provided thread_id or let agent create one
         response = await agent_manager.chat(
             message=request.message,
-            thread_id=request.thread_id
+            thread_id=request.thread_id,
+            use_orchestrator=True
         )
         
         return ChatResponse(

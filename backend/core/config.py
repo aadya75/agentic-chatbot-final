@@ -43,8 +43,12 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.7
     llm_max_tokens: int = 2048
     
+    light_llm_model: str = "llama-2-7b-chat"
+    light_llm_temperature: float = 0.5
+    light_llm_max_tokens: int = 1024    
+    
     # API Keys for external services
-    api_token: str = ""  # Bright Data token (if needed)
+    api_token: str = ""  
     
     # MCP Server Configuration
     enable_gmail: bool = True

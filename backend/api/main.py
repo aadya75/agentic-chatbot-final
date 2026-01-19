@@ -1,5 +1,5 @@
 # backend/main.py
-# REPLACE YOUR ENTIRE main.py WITH THIS
+
 
 import os
 from fastapi import FastAPI, Request
@@ -9,6 +9,8 @@ import logging
 import time
 
 from api.routes import knowledge
+from backend.orchestration.orchestrator import create_orchestrator
+from backend.orchestration.orchestrator import create_orchestrator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,8 +30,19 @@ async def lifespan(app: FastAPI):
     from core.agent import agent_manager
     
     try:
+        # Step 1: Initialize AgentManager (MCP tools)
         await agent_manager.initialize()
-        logger.info("✅ Backend initialized successfully")
+        logger.info("✅ Agent initialized successfully")
+        
+        # Step 2: Create and attach orchestrator
+        orchestrator = create_orchestrator(agent_manager)
+        agent_manager.orchestrator = orchestrator
+        logger.info("✅ Orchestrator attached")
+        
+        # Store in app state
+        app.state.agent_manager = agent_manager
+        app.state.orchestrator = orchestrator
+        
     except Exception as e:
         logger.error(f"❌ Failed to initialize agent manager: {e}")
         logger.warning("⚠️  Continuing without agent - some features may not work")
@@ -135,7 +148,6 @@ if __name__ == "__main__":
 async def startup_event():
     # ... your existing startup code ...
     
-    # ADD THESE LINES:
     # Create data directories if they don't exist
     os.makedirs(os.getenv('FAISS_INDEX_DIR', './data/indices'), exist_ok=True)
     os.makedirs(os.getenv('UPLOAD_DIR', './data/uploads'), exist_ok=True)

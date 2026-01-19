@@ -3,12 +3,19 @@ FAISS Vector Store
 Manages vector search index with persistence
 """
 
+import logging
 import os
 import json
 import faiss
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 class VectorStore:
@@ -53,9 +60,9 @@ class VectorStore:
                     data = json.load(f)
                     self.metadata = data.get('chunks', [])
                     self.id_to_paper = data.get('id_to_paper', {})
-                print(f"Loaded existing index with {self.index.ntotal} vectors")
+                logger.info(f"Loaded existing index with {self.index.ntotal} vectors")
             except Exception as e:
-                print(f"Error loading index: {e}. Creating new index.")
+                logger.info(f"Error loading index: {e}. Creating new index.")
                 self._create_new_index()
         else:
             self._create_new_index()
@@ -72,7 +79,7 @@ class VectorStore:
         
         self.metadata = []
         self.id_to_paper = {}
-        print(f"Created new {self.index_type} index")
+        logger.info(f"Created new {self.index_type} index")
     
     def add_documents(self, embeddings: np.ndarray, chunks: List[Dict], paper_id: str):
         """
@@ -101,7 +108,7 @@ class VectorStore:
         # Persist
         self._save_index()
         
-        print(f"Added {len(chunks)} chunks for paper {paper_id}")
+        logger.info(f"Added {len(chunks)} chunks for paper {paper_id}")
     
     def search(self, query_embedding: np.ndarray, k: int = 5) -> List[Dict]:
         """
@@ -179,7 +186,7 @@ class VectorStore:
             self.id_to_paper = new_id_to_paper
             
             self._save_index()
-            print(f"Deleted {deleted_count} chunks for paper {paper_id}")
+            logger.info(f"Deleted {deleted_count} chunks for paper {paper_id}")
         
         return deleted_count
     
