@@ -580,6 +580,9 @@ class AgentManager:
             
             execution_time = time.time() - start_time
             
+            # Extract response content
+            final_message = response["messages"][-1].content
+            
             # Add assistant response to thread
             self.add_message(thread_id, "assistant", response_text)
             
