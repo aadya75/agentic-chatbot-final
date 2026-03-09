@@ -1,221 +1,241 @@
 """
-FAISS Vector Store
-Manages vector search index with persistence
+Supabase Vector Store
+Replaces FAISS with Supabase vector storage
 """
 
 import logging
-import os
 import json
-import faiss
+from typing import List, Dict
 import numpy as np
-from typing import List, Dict, Tuple, Optional
-from pathlib import Path
+from supabase import create_client, Client
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
-class VectorStore:
+class SupabaseVectorStore:
     """
-    FAISS-based vector store with metadata management
+    Supabase-based vector store with PostgreSQL pgvector
     """
     
-    def __init__(self, index_dir: str, embedding_dim: int = 384, index_type: str = "FlatL2"):
+    def __init__(
+        self,
+        supabase_url: str,
+        supabase_key: str,
+        embedding_dim: int = 384
+    ):
         """
-        Initialize vector store
+        Initialize Supabase vector store
         
         Args:
-            index_dir: Directory to store FAISS index
+            supabase_url: Supabase project URL
+            supabase_key: Supabase service role key
             embedding_dim: Dimension of embeddings
-            index_type: Type of FAISS index (FlatL2, IVFFlat, etc.)
         """
-        self.index_dir = Path(index_dir)
-        if self.index_dir.exists() and not self.index_dir.is_dir():
-            # If it exists but is not a directory, remove it
-            self.index_dir.unlink()
-        self.index_dir.mkdir(parents=True, exist_ok=True)
-        
+        self.supabase: Client = create_client(supabase_url, supabase_key)
         self.embedding_dim = embedding_dim
-        self.index_type = index_type
         
-        self.index_path = self.index_dir / "faiss.index"
-        self.metadata_path = self.index_dir / "metadata.json"
-        
-        # Initialize or load index
-        self.index = None
-        self.metadata = []  # List of chunk metadata
-        self.id_to_paper = {}  # Map chunk ID to paper ID
-        
-        self._load_or_create_index()
+        logger.info("Initialized Supabase vector store")
     
-    def _load_or_create_index(self):
-        """Load existing index or create new one"""
-        if self.index_path.exists() and self.metadata_path.exists():
-            try:
-                self.index = faiss.read_index(str(self.index_path))
-                with open(self.metadata_path, 'r') as f:
-                    data = json.load(f)
-                    self.metadata = data.get('chunks', [])
-                    self.id_to_paper = data.get('id_to_paper', {})
-                logger.info(f"Loaded existing index with {self.index.ntotal} vectors")
-            except Exception as e:
-                logger.info(f"Error loading index: {e}. Creating new index.")
-                self._create_new_index()
-        else:
-            self._create_new_index()
-    
-    def _create_new_index(self):
-        """Create a new FAISS index"""
-        if self.index_type == "FlatL2":
-            self.index = faiss.IndexFlatL2(self.embedding_dim)
-        elif self.index_type == "FlatIP":
-            self.index = faiss.IndexFlatIP(self.embedding_dim)
-        else:
-            # Default to FlatL2
-            self.index = faiss.IndexFlatL2(self.embedding_dim)
-        
-        self.metadata = []
-        self.id_to_paper = {}
-        logger.info(f"Created new {self.index_type} index")
-    
-    def add_documents(self, embeddings: np.ndarray, chunks: List[Dict], paper_id: str):
+    def add_documents(
+        self,
+        embeddings: np.ndarray,
+        chunks: List[Dict],
+        paper_id: str,
+        user_id: str = None
+    ) -> Dict:
         """
-        Add documents to the index
+        Add documents to Supabase
         
         Args:
             embeddings: Matrix of embeddings (n_chunks, embedding_dim)
             chunks: List of chunk dictionaries
             paper_id: ID of the paper these chunks belong to
+            user_id: Optional user identifier
+            
+        Returns:
+            Insertion results
         """
         if embeddings.shape[0] != len(chunks):
             raise ValueError("Number of embeddings must match number of chunks")
         
-        # Get current index size
-        start_id = self.index.ntotal
-        
-        # Add to FAISS index
-        self.index.add(embeddings.astype(np.float32))
-        
-        # Add metadata
-        for i, chunk in enumerate(chunks):
-            chunk_id = start_id + i
-            self.metadata.append(chunk)
-            self.id_to_paper[str(chunk_id)] = paper_id
-        
-        # Persist
-        self._save_index()
-        
-        logger.info(f"Added {len(chunks)} chunks for paper {paper_id}")
+        try:
+            # First, insert paper record if it doesn't exist
+            paper_data = {
+                'id': paper_id,
+                'filename': chunks[0]['metadata'].get('filename', 'unknown'),
+                'user_id': user_id,
+                'processed': True
+            }
+            
+            self.supabase.table('papers').upsert(paper_data).execute()
+            
+            # Prepare chunk records
+            chunk_records = []
+            for i, (embedding, chunk) in enumerate(zip(embeddings, chunks)):
+                chunk_record = {
+                    'paper_id': paper_id,
+                    'chunk_text': chunk['text'],
+                    'chunk_index': i,
+                    'start_char': chunk.get('start_char', 0),
+                    'end_char': chunk.get('end_char', 0),
+                    'embedding': embedding.tolist(),  # Convert numpy to list
+                    'metadata': chunk.get('metadata', {})
+                }
+                chunk_records.append(chunk_record)
+            
+            # Batch insert chunks
+            if chunk_records:
+                response = self.supabase.table('document_chunks').insert(chunk_records).execute()
+                
+                logger.info(f"Added {len(chunks)} chunks for paper {paper_id}")
+                return {
+                    'success': True,
+                    'chunks_inserted': len(chunks),
+                    'paper_id': paper_id
+                }
+            
+        except Exception as e:
+            logger.error(f"Error adding documents to Supabase: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
     
-    def search(self, query_embedding: np.ndarray, k: int = 5) -> List[Dict]:
+    def search(
+        self,
+        query_embedding: np.ndarray,
+        k: int = 5,
+        user_id: str = None,
+        filter_paper_id: str = None
+    ) -> List[Dict]:
         """
-        Search for similar chunks
+        Search for similar chunks using Supabase vector search
         
         Args:
             query_embedding: Query embedding vector
             k: Number of results to return
+            user_id: Filter by user ID
+            filter_paper_id: Filter by specific paper
             
         Returns:
             List of dictionaries with chunk data and scores
         """
-        if self.index.ntotal == 0:
-            return []
-        
-        # Ensure query is 2D
-        if query_embedding.ndim == 1:
-            query_embedding = query_embedding.reshape(1, -1)
-        
-        # Search
-        k = min(k, self.index.ntotal)
-        distances, indices = self.index.search(query_embedding.astype(np.float32), k)
-        
-        # Prepare results
-        results = []
-        for dist, idx in zip(distances[0], indices[0]):
-            if idx < len(self.metadata):
+        try:
+            # Convert embedding to list for Supabase
+            embedding_list = query_embedding.tolist()
+            
+            # Build the query
+            query = self.supabase.rpc(
+                'match_document_chunks',
+                {
+                    'query_embedding': embedding_list,
+                    'match_count': k,
+                    'user_id_filter': user_id,
+                    'paper_id_filter': filter_paper_id
+                }
+            )
+            
+            response = query.execute()
+            
+            results = []
+            for row in response.data:
                 result = {
-                    'chunk': self.metadata[idx],
-                    'score': float(1 / (1 + dist)),  # Convert distance to similarity score
-                    'distance': float(dist),
-                    'paper_id': self.id_to_paper.get(str(idx), 'unknown')
+                    'chunk': {
+                        'text': row['chunk_text'],
+                        'metadata': row['metadata'] or {}
+                    },
+                    'score': row['similarity'],
+                    'paper_id': row['paper_id']
                 }
                 results.append(result)
-        
-        return results
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error searching in Supabase: {e}")
+            return []
     
-    def delete_paper(self, paper_id: str) -> int:
+    def delete_paper(self, paper_id: str) -> Dict:
         """
-        Delete all chunks belonging to a paper
+        Delete paper and all its chunks from Supabase
         
         Args:
             paper_id: ID of the paper to delete
             
         Returns:
-            Number of chunks deleted
+            Deletion results
         """
-        # Find chunks to keep
-        chunks_to_keep = []
-        embeddings_to_keep = []
-        new_id_to_paper = {}
-        
-        deleted_count = 0
-        
-        for i in range(len(self.metadata)):
-            if self.id_to_paper.get(str(i)) != paper_id:
-                chunks_to_keep.append(self.metadata[i])
-                new_id_to_paper[str(len(chunks_to_keep) - 1)] = self.id_to_paper[str(i)]
-                
-                # Get embedding from index
-                embedding = self.index.reconstruct(i)
-                embeddings_to_keep.append(embedding)
-            else:
-                deleted_count += 1
-        
-        if deleted_count > 0:
-            # Rebuild index
-            self._create_new_index()
+        try:
+            # Delete paper (cascade will delete chunks)
+            response = self.supabase.table('papers').delete().eq('id', paper_id).execute()
             
-            if embeddings_to_keep:
-                embeddings_array = np.vstack(embeddings_to_keep)
-                self.index.add(embeddings_array.astype(np.float32))
+            return {
+                'success': True,
+                'paper_id': paper_id,
+                'message': f'Deleted paper {paper_id}'
+            }
             
-            self.metadata = chunks_to_keep
-            self.id_to_paper = new_id_to_paper
-            
-            self._save_index()
-            logger.info(f"Deleted {deleted_count} chunks for paper {paper_id}")
-        
-        return deleted_count
+        except Exception as e:
+            logger.error(f"Error deleting paper from Supabase: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
     
-    def get_all_papers(self) -> List[str]:
+    def update_paper_user(self, paper_id: str, user_id: str) -> Dict:
+        """Update the user_id for a paper"""
+        try:
+            response = self.supabase.table('papers').update(
+                {'user_id': user_id}
+            ).eq('id', paper_id).execute()
+            
+            return {'success': True, 'paper_id': paper_id}
+        except Exception as e:
+            logger.error(f"Error updating paper user: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def get_all_papers(self, user_id: str = None) -> List[Dict]:
         """
-        Get list of all paper IDs in the index
+        Get all papers for a user
         
+        Args:
+            user_id: Optional user filter
+            
         Returns:
-            List of unique paper IDs
+            List of papers
         """
-        return list(set(self.id_to_paper.values()))
+        try:
+            query = self.supabase.table('papers').select('*')
+            
+            if user_id:
+                query = query.eq('user_id', user_id)
+            
+            response = query.execute()
+            return response.data
+            
+        except Exception as e:
+            logger.error(f"Error getting papers from Supabase: {e}")
+            return []
     
-    def _save_index(self):
-        """Save index and metadata to disk"""
-        faiss.write_index(self.index, str(self.index_path))
-        
-        data = {
-            'chunks': self.metadata,
-            'id_to_paper': self.id_to_paper
-        }
-        
-        with open(self.metadata_path, 'w') as f:
-            json.dump(data, f)
-    
-    def get_stats(self) -> Dict:
-        """Get statistics about the index"""
-        return {
-            'total_chunks': self.index.ntotal,
-            'total_papers': len(self.get_all_papers()),
-            'embedding_dim': self.embedding_dim,
-            'index_type': self.index_type
-        }
+    def get_stats(self, user_id: str = None) -> Dict:
+        """Get statistics about stored documents"""
+        try:
+            # Get paper count
+            paper_query = self.supabase.table('papers').select('id', count='exact')
+            if user_id:
+                paper_query = paper_query.eq('user_id', user_id)
+            paper_response = paper_query.execute()
+            
+            # Get chunk count
+            chunk_query = self.supabase.table('document_chunks').select('id', count='exact')
+            chunk_response = chunk_query.execute()
+            
+            return {
+                'total_papers': paper_response.count or 0,
+                'total_chunks': chunk_response.count or 0,
+                'embedding_dim': self.embedding_dim
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting stats from Supabase: {e}")
+            return {'error': str(e)}

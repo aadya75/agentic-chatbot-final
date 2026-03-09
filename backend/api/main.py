@@ -1,6 +1,4 @@
 # backend/main.py
-
-
 import os
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,8 +7,6 @@ import logging
 import time
 
 from api.routes import knowledge
-from backend.orchestration.orchestrator import create_orchestrator
-from backend.orchestration.orchestrator import create_orchestrator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,16 +29,7 @@ async def lifespan(app: FastAPI):
         # Step 1: Initialize AgentManager (MCP tools)
         await agent_manager.initialize()
         logger.info("✅ Agent initialized successfully")
-        
-        # Step 2: Create and attach orchestrator
-        orchestrator = create_orchestrator(agent_manager)
-        agent_manager.orchestrator = orchestrator
-        logger.info("✅ Orchestrator attached")
-        
-        # Store in app state
-        app.state.agent_manager = agent_manager
-        app.state.orchestrator = orchestrator
-        
+               
     except Exception as e:
         logger.error(f"❌ Failed to initialize agent manager: {e}")
         logger.warning("⚠️  Continuing without agent - some features may not work")

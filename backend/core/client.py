@@ -5,6 +5,9 @@ Updated test script for orchestration system.
 Now tests both direct MCP and orchestrator.
 """
 
+# not updated to latest orchestration , test each mcp server using wow_orchestration
+
+
 import os
 import dotenv
 dotenv.load_dotenv()
@@ -17,7 +20,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(BACKEND_DIR))
 
 from core.agent import agent_manager
-from orchestration.orchestrator import create_orchestrator
+from orchestration.wow_orchestration import orchestrator
 
 # Load API keys
 API_TOKEN = os.getenv("API_TOKEN")
@@ -92,7 +95,6 @@ async def test_orchestrator():
         await agent_manager.initialize()
         
         # Create orchestrator
-        orchestrator = create_orchestrator(agent_manager)
         agent_manager.orchestrator = orchestrator
         
         print("\n✅ Orchestrator ready")
@@ -110,8 +112,7 @@ async def test_orchestrator():
         # Test 2: Email query
         print("\n📧 Test 2: Email query")
         result = await agent_manager.chat(
-            message="Send an email to nainaamodii@gmail.com informing that orhestration of agentic chatbot is successfull.",
-            use_orchestrator=True
+            message="Send an email to nainaamodii@gmail.com informing that orhestration of agentic chatbot is successfull."
         )
         print(f"Response: {result['message']}...")
         print(f"Intents: {result['metadata'].get('intents', [])}")
@@ -121,7 +122,6 @@ async def test_orchestrator():
         print("\n🎯 Test 3: Multi-intent query")
         result = await agent_manager.chat(
             message="Create an event with following details : name PID controllers on 22 january 2026 for 3:00 pm to 4:00pm",
-            use_orchestrator=True
         )
         print(f"Response: {result['message']}...")
         print(f"Intents: {result['metadata'].get('intents', [])}")
@@ -150,7 +150,6 @@ async def test_thread_management():
     
     try:
         await agent_manager.initialize()
-        orchestrator = create_orchestrator(agent_manager)
         agent_manager.orchestrator = orchestrator
         
         # Create thread
@@ -161,15 +160,13 @@ async def test_thread_management():
         result1 = await agent_manager.chat(
             message="I'm working on a drone project",
             thread_id=thread_id,
-            use_orchestrator=True
         )
         print(f"\nMessage 1: {result1['message'][:100]}...")
         
         # Message 2 (with context)
         result2 = await agent_manager.chat(
             message="What sensors do I need?",
-            thread_id=thread_id,
-            use_orchestrator=True
+            thread_id=thread_id
         )
         print(f"\nMessage 2: {result2['message'][:100]}...")
         

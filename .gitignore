@@ -16,6 +16,7 @@ env/
 # Google OAuth
 backend/credentials/credentials.json
 backend/credentials/token.json
+backend/credentials/club_service_account.json
 
 # Node
 node_modules/
@@ -46,3 +47,12 @@ faiss.index
 metadata.json
 db
 *.pdf
+
+# club knowledge vectore indices
+backend/data/club_knowledge/indices/*
+backend/data/club_knowledge/metadata/*
+backend/data/club_knowledge/uploads/*
+backend/data/club_knowledge/last_updated.txt
+
+*.json
+

@@ -13,7 +13,7 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     message: str
     thread_id: Optional[str] = None
-    user_id: Optional[str] = None
+    # user_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     message: str
@@ -46,7 +46,7 @@ async def send_message(request: ChatRequest):
         response = await agent_manager.chat(
             message=request.message,
             thread_id=request.thread_id,
-            use_orchestrator=True
+            # user_id=1
         )
         
         return ChatResponse(

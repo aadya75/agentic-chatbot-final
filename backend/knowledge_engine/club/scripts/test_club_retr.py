@@ -56,8 +56,6 @@ def test_retrieval():
         sys.exit(1)
     
     print("✅ System ready!")
-    print()
-    
     # Test queries
     test_queries = [
         {

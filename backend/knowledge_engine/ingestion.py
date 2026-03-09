@@ -11,7 +11,7 @@ from typing import Dict, Optional, Callable
 import PyPDF2
 
 from .embedding_service import EmbeddingService
-from .vector_store import VectorStore
+from .vector_store import  SupabaseVectorStore
 from .graph_store import GraphStore
 from .chunking import DocumentChunker
 
@@ -21,28 +21,27 @@ class DocumentIngestion:
     Manages the full ingestion pipeline: PDF -> chunks -> embeddings -> index
     """
     
+
+    # In ingestion.py, update the __init__ method:
     def __init__(
         self,
         upload_dir: str,
-        vector_store: VectorStore,
+        supabase_url: str,  # NEW
+        supabase_key: str,  # NEW
         embedding_service: EmbeddingService,
         chunker: DocumentChunker,
         graph_store: Optional[GraphStore] = None
     ):
-        """
-        Initialize ingestion service
-        
-        Args:
-            upload_dir: Directory to store uploaded PDFs
-            vector_store: Vector store instance
-            embedding_service: Embedding service instance
-            chunker: Document chunker instance
-            graph_store: Optional graph store instance
-        """
         self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         
-        self.vector_store = vector_store
+        # Replace vector_store with SupabaseSupabaseVectorStore
+        self.vector_store = SupabaseVectorStore(
+            supabase_url=supabase_url,
+            supabase_key=supabase_key,
+            embedding_dim=embedding_service.get_embedding_dimension()
+        )
+        
         self.embedding_service = embedding_service
         self.chunker = chunker
         self.graph_store = graph_store
@@ -51,7 +50,8 @@ class DocumentIngestion:
         self,
         file_path: str,
         filename: str,
-        progress_callback: Optional[Callable[[str, int], None]] = None
+        progress_callback: Optional[Callable[[str, int], None]] = None,
+        user_id: Optional[str] = None
     ) -> Dict:
         """
         Process a PDF file and add it to the index
@@ -104,7 +104,7 @@ class DocumentIngestion:
                 progress_callback("Adding to vector store", 70)
             
             # Add to vector store
-            self.vector_store.add_documents(embeddings, chunks, paper_id)
+            self.vector_store.add_documents(embeddings, chunks, paper_id,user_id=user_id)
             
             # Update progress
             if progress_callback:

@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 import numpy as np
 
 from .embedding_service import EmbeddingService
-from .vector_store import VectorStore
+from .vector_store import SupabaseVectorStore
 from .graph_store import GraphStore
 
 
@@ -19,7 +19,7 @@ class HybridRetrieval:
     def __init__(
         self,
         embedding_service: EmbeddingService,
-        vector_store: VectorStore,
+        vector_store: SupabaseVectorStore,
         graph_store: Optional[GraphStore] = None
     ):
         """
@@ -38,7 +38,8 @@ class HybridRetrieval:
         self,
         query: str,
         top_k: int = 5,
-        include_citations: bool = False
+        include_citations: bool = False,
+        filter_paper_id: Optional[List[str]] = None,
     ) -> Dict:
         """
         Retrieve relevant chunks for a query
@@ -47,6 +48,7 @@ class HybridRetrieval:
             query: Search query
             top_k: Number of results to return
             include_citations: Whether to include citation information
+            filter_paper_ids: Optional list of paper IDs to filter results
             
         Returns:
             Dictionary with chunks and optional citation info
@@ -55,7 +57,12 @@ class HybridRetrieval:
         query_embedding = self.embedding_service.embed_text(query)
         
         # Vector search
-        results = self.vector_store.search(query_embedding, k=top_k)
+        results = self.vector_store.search(
+            query_embedding,
+            k=top_k,
+            filter_paper_id=filter_paper_id
+        )
+
         
         # Prepare response
         response = {
