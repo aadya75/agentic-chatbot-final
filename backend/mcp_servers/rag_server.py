@@ -255,7 +255,7 @@ async def handle_retrieve_context(arguments: dict) -> list[TextContent]:
             query=query,
             top_k=top_k,
             user_id=user_id,
-            include_citations=include_citations
+            include_citations=include_citations,
         )
         
         # Format response
@@ -268,7 +268,7 @@ async def handle_retrieve_context(arguments: dict) -> list[TextContent]:
                     "score": chunk["score"],
                     "source": chunk["metadata"].get("filename", "unknown"),
                     "paper_id": chunk.get("paper_id"),
-                    "chunk_index": chunk.get("chunk_index", -1)
+                    "chunk_index": chunk.get("metadata", {}).get("chunk_id", -1)
                 }
                 for chunk in results.get("chunks", [])
             ]

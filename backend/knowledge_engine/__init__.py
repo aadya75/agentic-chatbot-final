@@ -1,6 +1,5 @@
 """
-knowledge Engine - Embedded RAG System
-Retrieval-only knowledge base with vector search and optional citation graph
+knowledge Engine - Supabase-backed RAG System
 """
 
 from .embedding_service import EmbeddingService
@@ -11,10 +10,10 @@ from .ingestion import DocumentIngestion
 from .retrieval import HybridRetrieval
 
 __all__ = [
-    'EmbeddingService',
-    'VectorStore',
-    'GraphStore',
-    'DocumentChunker',
-    'DocumentIngestion',
-    'HybridRetrieval'
+    "EmbeddingService",
+    "SupabaseVectorStore",
+    "GraphStore",
+    "DocumentChunker",
+    "DocumentIngestion",
+    "HybridRetrieval",
 ]

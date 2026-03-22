@@ -1,293 +1,289 @@
 """
-Club Knowledge Vector Store
-FAISS-based vector store for club documents (separate from user docs)
+Club Knowledge Vector Store — Supabase backend
+
+Fixes vs original:
+  • ClubVectorStore is no longer instantiated at module level.
+    The singleton `club_vector_store` is created lazily via
+    get_club_vector_store() so a missing env var doesn't crash
+    every module that does `from knowledge_engine.club import ...`.
+  • search() signature aligns with the updated match_document_chunks RPC.
 """
-import json
-import pickle
-from pathlib import Path
+
+import logging
 from typing import List, Dict, Any, Optional
 import numpy as np
+from supabase import create_client, Client
 
-# FAISS import
-try:
-    import faiss
-except ImportError:
-    faiss = None
-
-from knowledge_engine.club.config import club_config
-from utils.logger import logger
+logger = logging.getLogger(__name__)
 
 
 class ClubVectorStore:
     """
-    FAISS vector store for club knowledge
-    
-    Separate from user document store to:
-    - Isolate club vs user queries
-    - Enable independent refresh cycles
-    - Maintain different metadata structures
+    Supabase-backed vector store for club knowledge.
+
+    Schema (shared with user RAG):
+        papers(id, filename, user_id, source, processed, upload_date)
+        document_chunks(id, paper_id, chunk_text, chunk_index,
+                        start_char, end_char, embedding, metadata)
+
+    Club rows: source = 'club', user_id = NULL.
     """
-    
-    def __init__(self):
-        self.indices_dir = club_config.CLUB_INDICES_DIR
-        self.metadata_dir = club_config.CLUB_METADATA_DIR
-        
-        # FAISS index
-        self.index = None
-        self.index_to_id = []  # Maps FAISS index position to document ID
-        self.documents = {}    # Document ID -> full document metadata
-        
-        # Dimension should match your existing embedding service (384 for all-MiniLM-L6-v2)
-        self.dimension = 384
-        
-        logger.info("ClubVectorStore initialized")
-    
-    def create_index(
+
+    SOURCE_TAG = "club"
+
+    def __init__(self, supabase_url: str, supabase_key: str):
+        if not supabase_url or not supabase_key:
+            raise ValueError(
+                "SUPABASE_URL and SUPABASE_SERVICE_KEY (or SUPABASE_ANON_KEY) "
+                "must be set in the environment."
+            )
+        self.client: Client = create_client(supabase_url, supabase_key)
+        logger.info("ClubVectorStore (Supabase) initialised")
+
+    # ------------------------------------------------------------------ #
+    # Write path                                                           #
+    # ------------------------------------------------------------------ #
+
+    def upsert_documents(
         self,
         embeddings: np.ndarray,
-        chunks: List[Dict[str, Any]]
+        chunks: List[Dict[str, Any]],
+        paper_id: str,
+        filename: str,
     ) -> Dict[str, Any]:
         """
-        Create FAISS index from embeddings and chunks
-        
+        Upsert chunks for one Drive file.  Existing rows for this paper_id
+        are deleted first so re-runs are idempotent.
+
         Args:
-            embeddings: numpy array of shape (n_chunks, 384)
-            chunks: List of chunk dicts with 'text' and 'metadata'
-            
-        Returns:
-            {
-                "status": "success" | "failed",
-                "num_vectors": int,
-                "index_path": str,
-                "metadata_path": str
-            }
+            embeddings : (N, D) float32 array
+            chunks     : list of {"text": str, "metadata": dict}
+            paper_id   : stable ID derived from Drive file path
+            filename   : human-readable name for the papers row
         """
-        if faiss is None:
-            raise ImportError("FAISS not installed. Install with: pip install faiss-cpu")
-        
-        logger.info(f"Creating FAISS index with {len(embeddings)} vectors (dim={self.dimension})")
-        
+        if embeddings.shape[0] != len(chunks):
+            raise ValueError(
+                f"Embedding count ({embeddings.shape[0]}) != chunk count ({len(chunks)})"
+            )
+
         try:
-            # Verify shapes
-            if embeddings.shape[1] != self.dimension:
-                raise ValueError(
-                    f"Embedding dimension mismatch: expected {self.dimension}, got {embeddings.shape[1]}"
-                )
-            
-            if len(embeddings) != len(chunks):
-                raise ValueError(
-                    f"Mismatch: {len(embeddings)} embeddings but {len(chunks)} chunks"
-                )
-            
-            # Create FAISS index (using IndexFlatL2 for exact search)
-            # For large datasets, consider IndexIVFFlat for faster approximate search
-            self.index = faiss.IndexFlatL2(self.dimension)
-            
-            # Normalize vectors for cosine similarity (optional but recommended)
-            faiss.normalize_L2(embeddings)
-            
-            # Add vectors to index
-            self.index.add(embeddings)
-            
-            # Build mapping and document store
-            self.index_to_id = []
-            self.documents = {}
-            
-            for idx, chunk in enumerate(chunks):
-                doc_id = f"chunk_{idx}"
-                self.index_to_id.append(doc_id)
-                self.documents[doc_id] = {
-                    "text": chunk["text"],
-                    "metadata": chunk["metadata"]
+            # 1. Upsert paper record
+            self.client.table("papers").upsert(
+                {
+                    "id": paper_id,
+                    "filename": filename,
+                    "user_id": None,
+                    "source": self.SOURCE_TAG,
+                    "processed": True,
                 }
-            
-            # Save index and metadata
-            index_path, metadata_path = self._save_index()
-            
-            logger.info(f"✓ Created FAISS index with {self.index.ntotal} vectors")
-            logger.info(f"✓ Saved to: {index_path}")
-            
+            ).execute()
+
+            # 2. Delete old chunks for clean re-embed
+            self.client.table("document_chunks").delete().eq(
+                "paper_id", paper_id
+            ).execute()
+
+            # 3. Insert new chunks
+            records = [
+                {
+                    "paper_id": paper_id,
+                    "chunk_text": chunk["text"],
+                    "chunk_index": i,
+                    "start_char": chunk.get("start_char", 0),
+                    "end_char": chunk.get("end_char", 0),
+                    "embedding": emb.tolist(),
+                    "metadata": chunk.get("metadata", {}),
+                }
+                for i, (emb, chunk) in enumerate(zip(embeddings, chunks))
+            ]
+
+            if records:
+                self.client.table("document_chunks").insert(records).execute()
+
+            logger.info(
+                f"Upserted {len(records)} chunks for club paper '{filename}' ({paper_id})"
+            )
             return {
-                "status": "success",
-                "num_vectors": self.index.ntotal,
-                "index_path": str(index_path),
-                "metadata_path": str(metadata_path)
+                "success": True,
+                "chunks_upserted": len(records),
+                "paper_id": paper_id,
             }
-            
-        except Exception as e:
-            logger.error(f"Error creating FAISS index: {e}")
-            return {
-                "status": "failed",
-                "error": str(e)
-            }
-    
-    def load_index(self) -> bool:
-        """
-        Load existing FAISS index from disk
-        
-        Returns:
-            True if loaded successfully, False otherwise
-        """
-        if faiss is None:
-            logger.error("FAISS not installed")
-            return False
-        
-        index_path = self.indices_dir / "club_knowledge.index"
-        metadata_path = self.indices_dir / "club_knowledge_metadata.pkl"
-        
-        if not index_path.exists() or not metadata_path.exists():
-            logger.warning("No existing index found")
-            return False
-        
+
+        except Exception as exc:
+            logger.error(f"Error upserting club documents: {exc}")
+            return {"success": False, "error": str(exc), "chunks_upserted": 0}
+
+    def delete_paper(self, paper_id: str) -> Dict[str, Any]:
+        """Delete one club paper and its chunks."""
         try:
-            # Load FAISS index
-            self.index = faiss.read_index(str(index_path))
-            
-            # Load metadata
-            with open(metadata_path, 'rb') as f:
-                metadata = pickle.load(f)
-                self.index_to_id = metadata['index_to_id']
-                self.documents = metadata['documents']
-            
-            logger.info(f"✓ Loaded FAISS index with {self.index.ntotal} vectors")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error loading FAISS index: {e}")
-            return False
-    
+            self.client.table("papers").delete().eq("id", paper_id).execute()
+            return {"success": True, "paper_id": paper_id}
+        except Exception as exc:
+            logger.error(f"Error deleting club paper {paper_id}: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    def delete_all_club_docs(self) -> Dict[str, Any]:
+        """Wipe all club documents — used before a full re-embed."""
+        try:
+            resp = (
+                self.client.table("papers")
+                .select("id")
+                .eq("source", self.SOURCE_TAG)
+                .execute()
+            )
+            ids = [row["id"] for row in (resp.data or [])]
+            for pid in ids:
+                self.client.table("papers").delete().eq("id", pid).execute()
+            logger.info(f"Deleted {len(ids)} club papers from Supabase")
+            return {"success": True, "papers_deleted": len(ids)}
+        except Exception as exc:
+            logger.error(f"Error deleting all club docs: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------ #
+    # Read path                                                            #
+    # ------------------------------------------------------------------ #
+
     def search(
         self,
         query_embedding: np.ndarray,
-        top_k: int = None,
-        category: str = None
+        top_k: int = 5,
+        category: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Search for similar documents
-        
+        Semantic search over club chunks via the match_document_chunks RPC.
+
         Args:
-            query_embedding: Query embedding vector (shape: (1, 384))
-            top_k: Number of results to return
-            category: Optional filter (events, announcements, coordinators)
-            
+            query_embedding : (D,) or (1, D) float32 array
+            top_k           : max results
+            category        : optional filter ('events' | 'announcements' | 'coordinators')
+
         Returns:
-            List of results:
-            [
-                {
-                    "text": str,
-                    "metadata": dict,
-                    "score": float  # L2 distance (lower = more similar)
-                },
-                ...
-            ]
+            [{"text": str, "metadata": dict, "score": float, "paper_id": str}, ...]
         """
-        if self.index is None:
-            logger.warning("Index not loaded, attempting to load...")
-            if not self.load_index():
-                logger.error("Failed to load index")
-                return []
-        
-        top_k = top_k or club_config.CLUB_TOP_K_RESULTS
-        
+        if isinstance(query_embedding, np.ndarray):
+            if query_embedding.ndim == 2:
+                query_embedding = query_embedding[0]
+            embedding_list = query_embedding.tolist()
+        else:
+            embedding_list = list(query_embedding)
+
         try:
-            # Ensure query embedding is 2D
-            if query_embedding.ndim == 1:
-                query_embedding = query_embedding.reshape(1, -1)
-            
-            # Normalize query embedding
-            faiss.normalize_L2(query_embedding)
-            
-            # Search
-            # Get more results initially if we need to filter by category
-            search_k = top_k * 3 if category else top_k
-            distances, indices = self.index.search(query_embedding, search_k)
-            
-            # Build results
-            results = []
-            for i, idx in enumerate(indices[0]):
-                if idx == -1:  # FAISS returns -1 for empty slots
-                    continue
-                
-                doc_id = self.index_to_id[idx]
-                doc = self.documents[doc_id]
-                
-                # Apply category filter if specified
-                if category and doc["metadata"].get("category") != category:
-                    continue
-                
-                results.append({
-                    "text": doc["text"],
-                    "metadata": doc["metadata"],
-                    "score": float(distances[0][i])
-                })
-                
-                # Stop if we have enough results
-                if len(results) >= top_k:
-                    break
-            
-            logger.debug(f"Found {len(results)} results (category: {category})")
-            return results
-            
-        except Exception as e:
-            logger.error(f"Error during search: {e}")
+            resp = self.client.rpc(
+                "match_document_chunks",
+                {
+                    "query_embedding": embedding_list,
+                    "match_count": top_k,
+                    "user_id_filter": None,
+                    "paper_id_filter": None,
+                    "source_filter": self.SOURCE_TAG,
+                    "category_filter": category,  # None → no category filter
+                },
+            ).execute()
+
+            return [
+                {
+                    "text": row["chunk_text"],
+                    "metadata": row.get("metadata") or {},
+                    "score": row["similarity"],
+                    "paper_id": row["paper_id"],
+                }
+                for row in (resp.data or [])
+            ]
+
+        except Exception as exc:
+            logger.error(f"Error searching club vector store: {exc}")
             return []
-    
-    def _save_index(self) -> tuple[Path, Path]:
-        """Save FAISS index and metadata to disk"""
-        # Save FAISS index
-        index_path = self.indices_dir / "club_knowledge.index"
-        faiss.write_index(self.index, str(index_path))
-        
-        # Save metadata
-        metadata = {
-            'index_to_id': self.index_to_id,
-            'documents': self.documents,
-            'dimension': self.dimension
-        }
-        
-        metadata_path = self.indices_dir / "club_knowledge_metadata.pkl"
-        with open(metadata_path, 'wb') as f:
-            pickle.dump(metadata, f)
-        
-        return index_path, metadata_path
-    
+
+    # ------------------------------------------------------------------ #
+    # Utility                                                              #
+    # ------------------------------------------------------------------ #
+
+    def get_all_papers(self) -> List[Dict[str, Any]]:
+        """Return all club paper records."""
+        try:
+            resp = (
+                self.client.table("papers")
+                .select("*")
+                .eq("source", self.SOURCE_TAG)
+                .execute()
+            )
+            return resp.data or []
+        except Exception as exc:
+            logger.error(f"Error fetching club papers: {exc}")
+            return []
+
     def get_stats(self) -> Dict[str, Any]:
-        """Get index statistics"""
-        if self.index is None:
-            if not self.load_index():
-                return {"status": "no_index"}
-        
-        # Count by category
-        category_counts = {}
-        for doc in self.documents.values():
-            cat = doc["metadata"].get("category", "unknown")
-            category_counts[cat] = category_counts.get(cat, 0) + 1
-        
-        return {
-            "status": "ready",
-            "total_vectors": self.index.ntotal,
-            "dimension": self.dimension,
-            "category_counts": category_counts,
-            "index_path": str(self.indices_dir / "club_knowledge.index")
-        }
-    
-    def delete_index(self):
-        """Delete existing index (for fresh rebuild)"""
-        index_path = self.indices_dir / "club_knowledge.index"
-        metadata_path = self.indices_dir / "club_knowledge_metadata.pkl"
-        
-        if index_path.exists():
-            index_path.unlink()
-            logger.info(f"Deleted index: {index_path}")
-        
-        if metadata_path.exists():
-            metadata_path.unlink()
-            logger.info(f"Deleted metadata: {metadata_path}")
-        
-        self.index = None
-        self.index_to_id = []
-        self.documents = {}
+        """Basic statistics about the club knowledge base."""
+        try:
+            papers_resp = (
+                self.client.table("papers")
+                .select("id", count="exact")
+                .eq("source", self.SOURCE_TAG)
+                .execute()
+            )
+            paper_count = papers_resp.count or 0
+
+            papers = self.get_all_papers()
+            paper_ids = [p["id"] for p in papers]
+
+            chunk_count = 0
+            category_counts: Dict[str, int] = {}
+
+            if paper_ids:
+                chunks_resp = (
+                    self.client.table("document_chunks")
+                    .select("metadata")
+                    .in_("paper_id", paper_ids)
+                    .limit(1000)
+                    .execute()
+                )
+                chunk_count = len(chunks_resp.data or [])
+                for row in chunks_resp.data or []:
+                    cat = (row.get("metadata") or {}).get("category", "unknown")
+                    category_counts[cat] = category_counts.get(cat, 0) + 1
+
+            return {
+                "status": "ready",
+                "backend": "Supabase pgvector",
+                "total_papers": paper_count,
+                "total_chunks": chunk_count,
+                "category_counts": category_counts,
+            }
+
+        except Exception as exc:
+            logger.error(f"Error getting club stats: {exc}")
+            return {"status": "error", "error": str(exc)}
 
 
-# Singleton
-club_vector_store = ClubVectorStore()
+# ---------------------------------------------------------------------------
+# Lazy singleton — avoids crashing on import when env vars are absent.
+# ---------------------------------------------------------------------------
+_club_vector_store: Optional[ClubVectorStore] = None
+
+
+def get_club_vector_store() -> ClubVectorStore:
+    """Return the shared ClubVectorStore, creating it on first call."""
+    global _club_vector_store
+    if _club_vector_store is None:
+        from knowledge_engine.club.config import club_config
+        _club_vector_store = ClubVectorStore(
+            supabase_url=club_config.SUPABASE_URL,
+            supabase_key=club_config.supabase_key,
+        )
+    return _club_vector_store
+
+
+# Backward-compat alias — existing code that does `from ... import club_vector_store`
+# will trigger the lazy init at first attribute access, not at import time.
+class _LazyStoreProxy:
+    """Transparent proxy that forwards attribute access to the real store."""
+
+    def __getattr__(self, name):
+        return getattr(get_club_vector_store(), name)
+
+    def __repr__(self):
+        return repr(get_club_vector_store())
+
+
+club_vector_store: ClubVectorStore = _LazyStoreProxy()  # type: ignore[assignment]

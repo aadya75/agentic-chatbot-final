@@ -9,8 +9,7 @@ from core.config import settings
 from api.models.response import ChatChunk, ToolInfo
 
 # Import the smart orchestrator - THIS IS REQUIRED
-from orchestration.amazing_orchestrator import SmartOrchestrator
-
+from orchestration.wow_orchestration import SmartOrchestrator
 logger = logging.getLogger(__name__)
 
 

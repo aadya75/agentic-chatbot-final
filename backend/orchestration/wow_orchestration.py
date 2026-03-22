@@ -1,240 +1,215 @@
 """
-smart_orchestrator_improved.py
-PRODUCTION VERSION - Fully Async Implementation
+Smart Orchestrator — Production Async Implementation
 
-Key improvements:
-- MCP clients initialized once and reused
-- Connection pooling for better performance
-- Proper async context management throughout
-- Graceful cleanup on shutdown
-- Production-ready async patterns
+Key fixes in this version:
+  1. RAG search now calls HybridRetrieval DIRECTLY instead of spawning
+     an MCP subprocess. The subprocess approach was for Claude Desktop
+     integration only — internally we just use the Python objects directly,
+     exactly the same pattern already used for club search.
+  2. fanout_to_workers now ALWAYS injects combined_context into every
+     worker payload when context exists. Previously it only did so when
+     task.requires_context=True, but the planner never reliably set that
+     flag, so context was silently dropped.
+  3. create_agent → create_react_agent (LangChain ≥ 0.2).
+  4. atexit cleanup is safe on Windows when the event loop is closed.
 """
+
 from __future__ import annotations
-from typing import TypedDict, List, Optional, Literal, Annotated, Union, Callable
-from langgraph.graph import StateGraph, START, END
-from langgraph.types import Send
-from pydantic import BaseModel, Field
-import operator
+
 import asyncio
+import atexit
 import json
 import logging
+import operator
+import os
 from datetime import datetime
-import atexit
+from pathlib import Path
+from typing import Annotated, List, Literal, Optional, TypedDict
 
+from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_community.tools import WikipediaQueryRun
 from langchain_community.utilities import WikipediaAPIWrapper
-from langchain.agents import create_agent
-import os
-from dotenv import load_dotenv
-from pathlib import Path
-from knowledge_engine.club.retrieval import club_retriever
+
+try:
+    from langgraph.prebuilt import create_react_agent
+except ImportError:
+    from langchain.agents import create_react_agent  # older fallback
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
-servers_dir = Path(__file__).resolve().parent.parent / 'mcp_servers'
+servers_dir = Path(__file__).resolve().parent.parent / "mcp_servers"
 
 # ============================================================================
-# LOGGING SETUP
+# LOGGING
 # ============================================================================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(f'orchestrator_{datetime.now():%Y%m%d}.log'),
-        logging.StreamHandler()
-    ]
+        logging.FileHandler(f"orchestrator_{datetime.now():%Y%m%d}.log"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# MCP CLIENT POOL - SINGLETON PATTERN
+# MCP CLIENT POOL — only used for GitHub and Google Workspace
+# RAG is now called directly (no subprocess).
 # ============================================================================
+
+
 class MCPClientPool:
-    """
-    Singleton class to manage MCP client connections
-    Clients are initialized once and reused across all nodes
-    """
     _instance = None
     _initialized = False
-    
+
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super(MCPClientPool, cls).__new__(cls)
+            cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     def __init__(self):
         if not MCPClientPool._initialized:
             self.github_client = None
-            self.rag_client = None
             self.google_workspace_client = None
             self._lock = asyncio.Lock()
             MCPClientPool._initialized = True
-            logger.info("MCPClientPool initialized")
-    
+
     async def get_github_client(self):
-        """Get or create GitHub MCP client"""
         if self.github_client is not None:
-            logger.debug("Reusing existing GitHub client")
             return self.github_client
-        
         async with self._lock:
-            # Double-check after acquiring lock
             if self.github_client is not None:
                 return self.github_client
-            
-            logger.info("Initializing GitHub MCP client...")
             from langchain_mcp_adapters.client import MultiServerMCPClient
-            
             github_pat = os.getenv("GITHUB_PAT")
             if not github_pat:
-                logger.error("GITHUB_PAT not set")
                 raise ValueError("GITHUB_PAT environment variable not set")
-            
             self.github_client = MultiServerMCPClient({
                 "github": {
                     "transport": "http",
                     "url": "https://api.githubcopilot.com/mcp/",
-                    "headers": {"Authorization": f"Bearer {github_pat}"}
+                    "headers": {"Authorization": f"Bearer {github_pat}"},
                 }
             })
-            
-            logger.info("✅ GitHub MCP client initialized and cached")
+            logger.info("✅ GitHub MCP client initialised")
             return self.github_client
-    
-    async def get_rag_client(self):
-        """Get or create RAG MCP client - STDIO transport for local RAG server"""
-        if self.rag_client is not None:
-            logger.debug("Reusing existing RAG client")
-            return self.rag_client
-        
-        async with self._lock:
-            if self.rag_client is not None:
-                return self.rag_client
-            
-            logger.info("Initializing RAG MCP client with STDIO transport...")
-            from langchain_mcp_adapters.client import MultiServerMCPClient
-            
-            # Use stdio transport, not HTTP
-            self.rag_client = MultiServerMCPClient({
-                "rag_server": {
-                    "command": "python",
-                    "args": ["-m", "mcp_servers.rag_server"],  # Use module path
-                    "transport": "stdio",
-                    "env": {
-                        "SUPABASE_URL": os.getenv("SUPABASE_URL", ""),
-                        "SUPABASE_SERVICE_KEY": os.getenv("SUPABASE_SERVICE_KEY", ""),
-                        "EMBEDDING_DIM": os.getenv("EMBEDDING_DIM", "384"),
-                        "PYTHONPATH": os.getenv("PYTHONPATH", os.getcwd())
-                    }
-                }
-            })
-            
-            logger.info("✅ RAG MCP client initialized and cached with STDIO transport")
-            return self.rag_client
-        
+
     async def get_google_workspace_client(self):
-        """Get or create Google Workspace MCP client"""
         if self.google_workspace_client is not None:
-            logger.debug("Reusing existing Google Workspace client")
             return self.google_workspace_client
-        
         async with self._lock:
-            # Double-check after acquiring lock
             if self.google_workspace_client is not None:
                 return self.google_workspace_client
-            
-            logger.info("Initializing Google Workspace MCP client...")
             from langchain_mcp_adapters.client import MultiServerMCPClient
-            
-            google_client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
-            google_client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
-            
-            if not google_client_id or not google_client_secret:
-                logger.error("Google OAuth credentials not configured")
-                raise ValueError("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be set")
-            
+            if not os.getenv("GOOGLE_OAUTH_CLIENT_ID"):
+                raise ValueError("GOOGLE_OAUTH_CLIENT_ID must be set")
             self.google_workspace_client = MultiServerMCPClient({
                 "google_workspace": {
                     "transport": "http",
                     "url": "http://localhost:8001/mcp/",
-                    "headers": {}
+                    "headers": {},
                 }
             })
-            
-            logger.info("✅ Google Workspace MCP client initialized and cached")
+            logger.info("✅ Google Workspace MCP client initialised")
             return self.google_workspace_client
-        
-    async def ensure_rag_server_ready(self) -> bool:
-        """Ensure RAG server is running and responsive"""
-        try:
-            client = await self.get_rag_client()
-            
-            # Test connection with a simple query
-            all_tools = await asyncio.wait_for(client.get_tools(), timeout=5.0)
-            
-            if any(tool.name == "retrieve_context" for tool in all_tools):
-                logger.info("✅ RAG server is ready")
-                return True
-            else:
-                logger.warning("⚠️ RAG server running but retrieve_context tool not found")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ RAG server not ready: {e}")
-            return False
-        
+
     async def cleanup(self):
-        """Cleanup all client connections"""
-        logger.info("Cleaning up MCP client connections...")
-        
-        # Close clients if they have cleanup methods
-        clients = [
+        for name, client in [
             ("GitHub", self.github_client),
-            ("RAG", self.rag_client),
-            ("Google Workspace", self.google_workspace_client)
-        ]
-        
-        for name, client in clients:
+            ("Google Workspace", self.google_workspace_client),
+        ]:
             if client is not None:
                 try:
-                    if hasattr(client, 'close'):
+                    if hasattr(client, "close"):
                         await client.close()
-                    elif hasattr(client, 'cleanup'):
+                    elif hasattr(client, "cleanup"):
                         await client.cleanup()
                     logger.info(f"✅ {name} client closed")
-                except Exception as e:
-                    logger.error(f"Error closing {name} client: {e}")
-        
-        # Reset clients
+                except Exception as exc:
+                    logger.error(f"Error closing {name} client: {exc}")
         self.github_client = None
-        self.rag_client = None
         self.google_workspace_client = None
-        
-        logger.info("MCP clients cleanup complete")
 
 
-# Global client pool instance
 mcp_pool = MCPClientPool()
 
 
-# Register cleanup on exit
-def cleanup_on_exit():
-    """Cleanup function to run on program exit"""
+def _cleanup_on_exit():
     try:
-        asyncio.run(mcp_pool.cleanup())
-    except Exception as e:
-        logger.error(f"Error during cleanup: {e}")
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(mcp_pool.cleanup())
+        else:
+            loop.run_until_complete(mcp_pool.cleanup())
+    except Exception as exc:
+        logger.error(f"Error during atexit cleanup: {exc}")
 
-atexit.register(cleanup_on_exit)
+
+atexit.register(_cleanup_on_exit)
+
+# ============================================================================
+# DIRECT RAG SERVICE — replaces the MCP subprocess approach
+# ============================================================================
+
+def _build_rag_retrieval_service():
+    """
+    Build HybridRetrieval directly from env vars.
+    Returns None if Supabase credentials are missing.
+    """
+    supabase_url = os.getenv("SUPABASE_URL", "").strip()
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY", os.getenv("SUPABASE_ANON_KEY", "")).strip()
+
+    if not supabase_url or not supabase_key:
+        logger.warning("⚠️  SUPABASE_URL / SUPABASE_SERVICE_KEY not set — user RAG disabled")
+        return None
+
+    try:
+        from knowledge_engine.embedding_service import EmbeddingService
+        from knowledge_engine.vector_store import SupabaseVectorStore
+        from knowledge_engine.retrieval import HybridRetrieval
+
+        embedding_service = EmbeddingService(
+            embedding_dim=int(os.getenv("EMBEDDING_DIM", "384"))
+        )
+        vector_store = SupabaseVectorStore(
+            supabase_url=supabase_url,
+            supabase_key=supabase_key,
+            embedding_dim=int(os.getenv("EMBEDDING_DIM", "384")),
+        )
+        retrieval_service = HybridRetrieval(
+            embedding_service=embedding_service,
+            vector_store=vector_store,
+        )
+        logger.info("✅ User RAG retrieval service ready (direct)")
+        return retrieval_service
+    except Exception as exc:
+        logger.error(f"❌ Failed to build RAG retrieval service: {exc}")
+        return None
+
+
+_rag_retrieval_service = None
+
+
+def get_rag_retrieval_service():
+    """Lazy singleton for the user RAG retrieval service."""
+    global _rag_retrieval_service
+    if _rag_retrieval_service is None:
+        _rag_retrieval_service = _build_rag_retrieval_service()
+    return _rag_retrieval_service
 
 
 # ============================================================================
 # MODELS
 # ============================================================================
+
+
 class ContextItem(BaseModel):
-    """Context gathered from various sources"""
     source: Literal["web_search", "rag", "conversation", "club_search"]
     content: str
     relevance_score: float = Field(ge=0, le=1)
@@ -242,7 +217,6 @@ class ContextItem(BaseModel):
 
 
 class WorkerTask(BaseModel):
-    """Task for a specific worker"""
     id: int
     title: str
     worker_type: Literal["github", "conversational", "calendar", "gmail"] = "conversational"
@@ -254,7 +228,6 @@ class WorkerTask(BaseModel):
 
 
 class ExecutionPlan(BaseModel):
-    """Intelligent execution plan"""
     needs_context: bool = False
     context_type: Optional[Literal["web", "rag", "club", "mixed"]] = None
     reasoning: str
@@ -265,7 +238,6 @@ class ExecutionPlan(BaseModel):
 
 
 class TaskResult(BaseModel):
-    """Result from task execution"""
     task_id: int
     worker_type: str
     success: bool
@@ -275,7 +247,6 @@ class TaskResult(BaseModel):
 
 
 class OrchestratorState(TypedDict):
-    """Enhanced state with context support"""
     user_query: str
     conversation_history: List[str]
     plan: Optional[ExecutionPlan]
@@ -289,962 +260,514 @@ class OrchestratorState(TypedDict):
 
 
 # ============================================================================
-# LLM & TOOLS INITIALIZATION
+# LLM
 # ============================================================================
+
 llm = ChatGroq(
     model="moonshotai/kimi-k2-instruct-0905",
     temperature=0.1,
-    api_key=os.getenv("GROQ_API_KEY")
+    api_key=os.getenv("GROQ_API_KEY"),
 )
 
-search_tool = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
-web_search_agent = create_agent(llm, tools=[search_tool])
+_wiki_tool = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
+web_search_agent = create_react_agent(llm, tools=[_wiki_tool])
 
-print("✅ LLM and Wikipedia search initialized")
-
+print("✅ LLM and Wikipedia search initialised")
 
 # ============================================================================
-# PLANNING AGENT
+# PLANNING
 # ============================================================================
+
 PLANNING_SYSTEM = """You are an intelligent planning agent that decides:
 1. Does this query need context from web search, RAG, or club search?
 2. Which workers are needed to execute the actual tasks?
 
 Context Types:
-- web: For general knowledge, Wikipedia-style information
-- rag: For internal documents, research papers, uploaded content
-- club: For club-specific information (events, announcements, coordinators)
-- mixed: When multiple context sources are needed
-- null: When no additional context is needed
+- web   : General knowledge / Wikipedia-style information
+- rag   : Internal documents, research papers, user-uploaded content
+- club  : Club-specific information (events, announcements, coordinators)
+- mixed : Multiple context sources needed
+- null  : No additional context needed
 
 Workers Available:
-- conversational: General chat, explanations, analysis
-- github: GitHub operations (repos, PRs, files)
-- calendar/gmail: Google Workspace operations
+- conversational : General chat, explanations, analysis
+- github         : GitHub operations (repos, PRs, files)
+- calendar/gmail : Google Workspace operations
 
-Analyze the query and create an intelligent plan."""
+IMPORTANT: When context is needed, always set requires_context=true on
+every task so the retrieved context is forwarded to the worker."""
 
 
 def planning_agent_node(state: OrchestratorState) -> dict:
-    """Planning agent that decides what context is needed"""
-    print("\n" + "="*60)
-    print("🤖 SMART PLANNING AGENT: Analyzing query...")
-    print("="*60)
-    
+    print("\n" + "=" * 60)
+    print("🤖 SMART PLANNING AGENT: Analysing query…")
+    print("=" * 60)
     logger.info(f"Planning for query: {state['user_query']}")
-    
+
     try:
         planner = llm.with_structured_output(ExecutionPlan)
-        
         plan = planner.invoke([
             SystemMessage(content=PLANNING_SYSTEM),
-            HumanMessage(content=f"""
-            User Query: {state['user_query']}
-            
-            Analyze what type of context is needed (web, rag, club, mixed, or none).
-            If context is needed, set needs_context=True and extract appropriate queries.
-            Identify which Google Workspace services are needed (if any).
-            Then create appropriate tasks for workers.
-            """)
+            HumanMessage(content=(
+                f"User Query: {state['user_query']}\n\n"
+                "Analyse what context is needed (web, rag, club, mixed, or none).\n"
+                "If context is needed, set needs_context=true and extract queries.\n"
+                "Set requires_context=true on tasks that should use the retrieved context.\n"
+                "Create tasks for the right workers."
+            )),
         ])
-        
-        print(f"✅ Analysis:")
-        print(f"   Context Needed: {plan.needs_context}")
-        if plan.context_type:
-            print(f"   Context Type: {plan.context_type}")
-        print(f"   Reasoning: {plan.reasoning}")
-        
+        print(f"✅ Plan: context={plan.context_type}, reason={plan.reasoning}")
         logger.info(f"Plan created: {plan.reasoning}")
-        
         return {"plan": plan, "tasks": plan.tasks}
-        
-    except Exception as e:
-        logger.error(f"Planning failed: {e}", exc_info=True)
+    except Exception as exc:
+        logger.error(f"Planning failed: {exc}", exc_info=True)
         raise
 
 
 def route_after_planning(state: OrchestratorState) -> str:
-    """Route based on context needs"""
     plan = state.get("plan")
-    
     if not plan or not plan.needs_context:
         return "execute_tasks"
-    
-    if plan.context_type == "web":
-        return "web_search"
-    elif plan.context_type == "rag":
-        return "rag_search"
-    elif plan.context_type == "club":
-        return "club_search"
-    elif plan.context_type == "mixed":
-        return "gather_mixed_context"
-    
-    return "execute_tasks"
+    return {
+        "web": "web_search",
+        "rag": "rag_search",
+        "club": "club_search",
+        "mixed": "gather_mixed_context",
+    }.get(plan.context_type or "", "execute_tasks")
 
 
 # ============================================================================
-# CONTEXT PROVIDERS - ASYNC VERSIONS
+# CONTEXT PROVIDERS
 # ============================================================================
+
 
 class WebSearchProvider:
-    """Gathers context from Wikipedia"""
-    
     async def search(self, query: str) -> List[ContextItem]:
-        """Perform Wikipedia search - ASYNC"""
-        print(f"\n🌐 WEB SEARCH: Searching for '{query}'")
-        logger.info(f"Web search for: {query}")
-        
+        print(f"\n🌐 WEB SEARCH: '{query}'")
         try:
-            # Run sync agent in executor
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
                 lambda: web_search_agent.invoke(
                     {"messages": [{"role": "user", "content": query}]}
-                )
+                ),
             )
-            
             content = ""
-            if "messages" in result:
-                for msg in result["messages"]:
-                    if hasattr(msg, 'content') and msg.content:
-                        content = msg.content
-                        break
-            
-            if not content:
-                content = str(result)
-            
-            print(f"   ✅ Search completed: {len(content)} chars")
-            
+            for msg in reversed(result.get("messages", [])):
+                if hasattr(msg, "content") and msg.content:
+                    content = msg.content
+                    break
+            content = content or str(result)
+            print(f"   ✅ {len(content)} chars")
             return [ContextItem(
                 source="web_search",
                 content=content[:1000],
                 relevance_score=0.9,
-                metadata={
-                    "query": query,
-                    "source": "wikipedia",
-                    "agent_used": "WikipediaQueryRun"
-                }
+                metadata={"query": query},
             )]
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"   ❌ Web search error: {error_msg[:100]}")
-            logger.error(f"Web search error: {error_msg}")
-            
+        except Exception as exc:
+            logger.error(f"Web search error: {exc}")
             return [ContextItem(
                 source="web_search",
-                content=f"Wikipedia search failed for: {query}. Error: {error_msg[:100]}",
+                content=f"Wikipedia search failed for: {query}",
                 relevance_score=0.1,
-                metadata={"error": error_msg, "query": query}
+                metadata={"error": str(exc), "query": query},
             )]
 
 
 async def web_search_node(state: OrchestratorState) -> dict:
-    """Gather web context before task execution - ASYNC"""
     plan = state["plan"]
-    
-    print("\n" + "="*60)
-    print("🌐 GATHERING WEB CONTEXT FROM WIKIPEDIA")
-    print("="*60)
-    
+    print("\n" + "=" * 60)
+    print("🌐 GATHERING WEB CONTEXT")
+    print("=" * 60)
     provider = WebSearchProvider()
+    results = await asyncio.gather(
+        *[provider.search(q) for q in plan.search_queries[:2]],
+        return_exceptions=True,
+    )
     all_context = []
-    
-    # Search concurrently
-    tasks = [provider.search(query) for query in plan.search_queries[:2]]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    for result in results:
-        if isinstance(result, Exception):
-            logger.error(f"Web search error: {result}")
-        else:
-            all_context.extend(result)
-    
-    combined = "\n\n".join([
-        f"[Web Search: '{item.metadata.get('query', 'unknown')}']\n{item.content}"
-        for item in sorted(all_context, key=lambda x: x.relevance_score, reverse=True)
-    ])
-    
-    print(f"   Total web context gathered: {len(combined)} characters")
-    
-    return {
-        "web_context": all_context,
-        "combined_context": combined
-    }
+    for r in results:
+        if not isinstance(r, Exception):
+            all_context.extend(r)
+    combined = "\n\n".join(
+        f"[Web: '{i.metadata.get('query')}']\n{i.content}"
+        for i in sorted(all_context, key=lambda x: x.relevance_score, reverse=True)
+    )
+    return {"web_context": all_context, "combined_context": combined}
 
 
 class RagSearchProvider:
-    """Gathers context from RAG MCP server - ASYNC with connection reuse and retry logic"""
-    
-    async def search(self, query: str, retries: int = 2) -> List[ContextItem]:
-        """Perform RAG search using cached MCP client with retry logic"""
-        print(f"\n📚 RAG SEARCH: Searching for '{query}'")
-        logger.info(f"RAG search for: {query}")
-        
-        for attempt in range(retries + 1):
-            try:
-                # Get cached client from pool
-                client = await mcp_pool.get_rag_client()
-                
-                # Get tools with timeout
-                try:
-                    all_tools = await asyncio.wait_for(client.get_tools(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    logger.warning(f"RAG client.get_tools() timeout (attempt {attempt + 1})")
-                    if attempt < retries:
-                        # Force reconnection on next attempt
-                        mcp_pool.rag_client = None
-                        continue
-                    raise
-                
-                # Find retrieve_context tool
-                retrieve_tool = None
-                for tool_obj in all_tools:
-                    if tool_obj.name == "retrieve_context":
-                        retrieve_tool = tool_obj
-                        break
-                
-                if not retrieve_tool:
-                    logger.warning(f"RAG tool not found. Available: {[t.name for t in all_tools]}")
-                    return [ContextItem(
-                        source="rag",
-                        content=f"RAG search tool not available. Please ensure the RAG server is running.",
-                        relevance_score=0.1,
-                        metadata={"error": "Tool not found", "query": query}
-                    )]
-                
-                # Execute search with timeout
-                try:
-                    result = await asyncio.wait_for(
-                        retrieve_tool.ainvoke({
-                            "query": query, 
-                            "top_k": 3,
-                            "include_citations": False
-                        }),
-                        timeout=10.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"RAG search timeout (attempt {attempt + 1})")
-                    if attempt < retries:
-                        continue
-                    raise
-                
-                # Extract output (your existing parsing logic)
-                output = ""
-                if isinstance(result, dict):
-                    output = result.get("content") or result.get("text") or json.dumps(result, indent=2)
-                elif hasattr(result, "content"):
-                    output = result.content
-                elif hasattr(result, "text"):
-                    output = result.text
-                else:
-                    output = str(result)
-                
-                # Parse JSON if needed
-                if output.startswith('{') and output.endswith('}'):
-                    try:
-                        response_data = json.loads(output)
-                        if "chunks" in response_data:
-                            chunks = response_data["chunks"]
-                            formatted_chunks = []
-                            for i, chunk in enumerate(chunks, 1):
-                                formatted_chunks.append(
-                                    f"Result {i} (score: {chunk.get('score', 0):.3f}):\n"
-                                    f"Source: {chunk.get('source', 'unknown')}\n"
-                                    f"{chunk.get('text', '')}\n"
-                                )
-                            output = "\n---\n".join(formatted_chunks)
-                    except json.JSONDecodeError:
-                        pass
-                
-                print(f"   ✅ RAG search completed: {len(output)} chars")
-                
+    """
+    Calls HybridRetrieval directly — no MCP subprocess needed.
+    The MCP server (rag_server.py) is only for Claude Desktop / external clients.
+    """
+
+    async def search(self, query: str) -> List[ContextItem]:
+        print(f"\n📚 RAG SEARCH (direct): '{query}'")
+
+        retrieval_service = get_rag_retrieval_service()
+        if retrieval_service is None:
+            logger.warning("RAG retrieval service not available")
+            return [ContextItem(
+                source="rag",
+                content="RAG service not available. Check SUPABASE_URL and SUPABASE_SERVICE_KEY.",
+                relevance_score=0.0,
+                metadata={"query": query},
+            )]
+
+        try:
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(
+                None,
+                lambda: retrieval_service.retrieve(query=query, top_k=5),
+            )
+
+            chunks = results.get("chunks", [])
+            if not chunks:
                 return [ContextItem(
                     source="rag",
-                    content=output[:1500],
-                    relevance_score=0.85,
-                    metadata={
-                        "query": query,
-                        "source": "rag_mcp",
-                        "tool_used": "retrieve_context"
-                    }
+                    content="No relevant documents found in the knowledge base.",
+                    relevance_score=0.0,
+                    metadata={"query": query, "num_results": 0},
                 )]
-                
-            except Exception as e:
-                error_msg = str(e)
-                if attempt < retries:
-                    logger.warning(f"RAG search attempt {attempt + 1} failed: {error_msg[:100]}. Retrying...")
-                    # Exponential backoff
-                    await asyncio.sleep(1 * (2 ** attempt))
-                    continue
-                else:
-                    print(f"   ❌ RAG search error after {retries + 1} attempts: {error_msg[:100]}")
-                    logger.error(f"RAG search error: {error_msg}")
-                    
-                    return [ContextItem(
-                        source="rag",
-                        content=f"RAG search failed for: {query}. Please try again later.",
-                        relevance_score=0.1,
-                        metadata={"error": error_msg, "query": query}
-                    )]
+
+            # Format chunks into readable context
+            formatted = "\n---\n".join(
+                f"Result {i+1} (score: {c['score']:.3f})\n"
+                f"Source: {c['metadata'].get('filename', 'unknown')}\n"
+                f"{c['text']}"
+                for i, c in enumerate(chunks)
+            )
+            print(f"   ✅ {len(chunks)} chunks retrieved")
+            return [ContextItem(
+                source="rag",
+                content=formatted[:2000],
+                relevance_score=chunks[0]["score"] if chunks else 0.0,
+                metadata={"query": query, "num_results": len(chunks)},
+            )]
+
+        except Exception as exc:
+            logger.error(f"RAG direct search error: {exc}")
+            return [ContextItem(
+                source="rag",
+                content=f"RAG search failed: {exc}",
+                relevance_score=0.0,
+                metadata={"error": str(exc), "query": query},
+            )]
+
 
 async def rag_search_node(state: OrchestratorState) -> dict:
-    """Gather RAG context before task execution - ASYNC"""
     plan = state["plan"]
-    
-    print("\n" + "="*60)
-    print("📚 GATHERING RAG CONTEXT")
-    print("="*60)
-    
+    print("\n" + "=" * 60)
+    print("📚 GATHERING RAG CONTEXT (direct)")
+    print("=" * 60)
     provider = RagSearchProvider()
-    
-    # Search concurrently
-    tasks = [provider.search(query) for query in plan.rag_queries[:2]]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
+    results = await asyncio.gather(
+        *[provider.search(q) for q in plan.rag_queries[:2]],
+        return_exceptions=True,
+    )
     all_context = []
-    for result in results:
-        if isinstance(result, Exception):
-            logger.error(f"RAG search error: {result}")
-        else:
-            all_context.extend(result)
-    
-    combined = "\n\n".join([
-        f"[RAG Search: '{item.metadata.get('query', 'unknown')}']\n{item.content}"
-        for item in sorted(all_context, key=lambda x: x.relevance_score, reverse=True)
-    ])
-    
-    print(f"   Total RAG context gathered: {len(combined)} characters")
-    
-    return {
-        "rag_context": all_context,
-        "combined_context": combined
-    }
+    for r in results:
+        if not isinstance(r, Exception):
+            all_context.extend(r)
+    combined = "\n\n".join(
+        f"[RAG: '{i.metadata.get('query')}']\n{i.content}"
+        for i in sorted(all_context, key=lambda x: x.relevance_score, reverse=True)
+    )
+    print(f"   Total RAG context: {len(combined)} chars")
+    return {"rag_context": all_context, "combined_context": combined}
 
 
 class ClubSearchProvider:
-    """Gathers context from club search tool"""
-    
     async def search(self, query: str) -> List[ContextItem]:
-        """Perform club search using the tool - ASYNC"""
-        print(f"\n👥 CLUB SEARCH: Searching for '{query}'")
-        logger.info(f"Club search for: {query}")
-        
+        print(f"\n👥 CLUB SEARCH: '{query}'")
         try:
-            # Extract category using LLM
             loop = asyncio.get_event_loop()
-            category_response = await loop.run_in_executor(
+            cat_resp = await loop.run_in_executor(
                 None,
                 lambda: llm.invoke([
-                    SystemMessage(content="You are a category classifier. Respond with only one word."),
-                    HumanMessage(content=f"""Define the category from the following query for club search.
-The category should be one of these: events, announcements, coordinators.
-If not relevant to any category, respond with 'general'.
-
-Query: {query}
-
-Respond with ONLY the category name (one word).""")
-                ])
+                    SystemMessage(content="You are a category classifier. Respond with ONE word only."),
+                    HumanMessage(content=(
+                        f"Classify this query into one of: events, announcements, coordinators, general.\n"
+                        f"Query: {query}\nRespond with the category name only."
+                    )),
+                ]),
             )
-            
-            category = category_response.content.strip().lower()
-            valid_categories = ["events", "announcements", "coordinators", "general"]
-            if category not in valid_categories:
+            category = cat_resp.content.strip().lower()
+            if category not in {"events", "announcements", "coordinators", "general"}:
                 category = "general"
-            
-            print(f"   🏷️ Identified category: {category}")
-            
-            search_category = None if category == "general" else category
-            
-            # Use club search tool (run in executor if it's sync)
+            search_cat = None if category == "general" else category
+            print(f"   🏷️ Category: {category}")
+
+            from knowledge_engine.club.retrieval import get_club_retriever
+            retriever = get_club_retriever()
             results = await loop.run_in_executor(
                 None,
-                lambda: club_retriever.retrieve(
-                    query=query,
-                    category=search_category,  
-                    top_k=3
-                )
+                lambda: retriever.retrieve(query=query, category=search_cat, top_k=3),
             )
-            
-            print(f"   ✅ Club search completed - found {len(results) if isinstance(results, list) else 'N/A'} results")
-            
+
             if not results:
                 return [ContextItem(
                     source="club_search",
                     content="No club information found for this query.",
                     relevance_score=0.0,
-                    metadata={"query": query, "category": category, "results_count": 0}
+                    metadata={"query": query, "category": category},
                 )]
-            
-            # Handle results
-            if isinstance(results, dict):
-                content = results.get('content', results.get('text', str(results)))
-                score = results.get('score', results.get('relevance', 0.5))
-                
-                return [ContextItem(
-                    source="club_search",
-                    content=content,
-                    relevance_score=score,
-                    metadata={"query": query, "category": category, "results_count": 1}
-                )]
-            
-            elif isinstance(results, list):
-                combined_content = ""
-                total_score = 0.0
-                
-                for i, result in enumerate(results):
-                    if isinstance(result, dict):
-                        content = result.get('content', result.get('text', str(result)))
-                        score = result.get('score', result.get('relevance', 0.5))
-                    else:
-                        content = str(result)
-                        score = 0.5
-                    
-                    combined_content += f"Result {i+1} (Relevance: {score:.2f}):\n{content}\n\n"
-                    total_score += score
-                
-                avg_score = total_score / len(results) if results else 0.5
-                
-                return [ContextItem(
-                    source="club_search",
-                    content=combined_content.strip(),
-                    relevance_score=avg_score,
-                    metadata={"query": query, "category": category, "results_count": len(results)}
-                )]
-            
-            else:
-                return [ContextItem(
-                    source="club_search",
-                    content=str(results),
-                    relevance_score=0.5,
-                    metadata={"query": query, "category": category, "results_count": 1}
-                )]
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"   ❌ Club search error: {error_msg[:100]}")
-            logger.error(f"Club search error: {error_msg}")
-            
+
+            combined_content = "\n\n".join(
+                f"Result {i+1} (score: {r.get('score', 0):.2f}):\n{r.get('content', '')}"
+                for i, r in enumerate(results)
+            )
+            avg_score = sum(r.get("score", 0.5) for r in results) / len(results)
+            print(f"   ✅ {len(results)} club chunks retrieved")
             return [ContextItem(
                 source="club_search",
-                content=f"Club search failed for: {query}. Error: {error_msg[:100]}",
+                content=combined_content.strip(),
+                relevance_score=avg_score,
+                metadata={"query": query, "category": category, "results_count": len(results)},
+            )]
+
+        except Exception as exc:
+            logger.error(f"Club search error: {exc}")
+            return [ContextItem(
+                source="club_search",
+                content=f"Club search failed: {exc}",
                 relevance_score=0.1,
-                metadata={"error": error_msg, "query": query, "results_count": 0}
+                metadata={"error": str(exc), "query": query},
             )]
 
 
 async def club_search_node(state: OrchestratorState) -> dict:
-    """Gather club context before task execution - ASYNC"""
     plan = state["plan"]
-    
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("👥 GATHERING CLUB CONTEXT")
-    print("="*60)
-    
+    print("=" * 60)
     provider = ClubSearchProvider()
-    
-    # Search concurrently
-    tasks = [provider.search(query) for query in plan.club_queries[:2]]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
+    results = await asyncio.gather(
+        *[provider.search(q) for q in plan.club_queries[:2]],
+        return_exceptions=True,
+    )
     all_context = []
-    for result in results:
-        if isinstance(result, Exception):
-            logger.error(f"Club search error: {result}")
-        else:
-            all_context.extend(result)
-    
-    combined = "\n\n".join([
-        f"[Club Search: '{item.metadata.get('query', 'unknown')}']\n{item.content}"
-        for item in sorted(all_context, key=lambda x: x.relevance_score, reverse=True)
-    ])
-    
-    print(f"   Total club context gathered: {len(combined)} characters")
-    
-    return {
-        "club_context": all_context,
-        "combined_context": combined
-    }
+    for r in results:
+        if not isinstance(r, Exception):
+            all_context.extend(r)
+    combined = "\n\n".join(
+        f"[Club: '{i.metadata.get('query')}']\n{i.content}"
+        for i in sorted(all_context, key=lambda x: x.relevance_score, reverse=True)
+    )
+    print(f"   Total club context: {len(combined)} chars")
+    return {"club_context": all_context, "combined_context": combined}
 
 
 async def gather_mixed_context_node(state: OrchestratorState) -> dict:
-    """Gather context from multiple sources for mixed queries - ASYNC"""
     plan = state["plan"]
-    
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("🔀 GATHERING MIXED CONTEXT")
-    print("="*60)
-    
-    # Gather all contexts concurrently
-    tasks = []
-    
+    print("=" * 60)
+
+    coros = []
     if plan.search_queries:
-        print("\n  → Gathering web context...")
-        tasks.append(("web", web_search_node(state)))
-    
+        coros.append(("web", web_search_node(state)))
     if plan.rag_queries:
-        print("\n  → Gathering RAG context...")
-        tasks.append(("rag", rag_search_node(state)))
-    
+        coros.append(("rag", rag_search_node(state)))
     if plan.club_queries:
-        print("\n  → Gathering club context...")
-        tasks.append(("club", club_search_node(state)))
-    
-    # Execute all searches concurrently
-    results = await asyncio.gather(*[task[1] for task in tasks], return_exceptions=True)
-    
-    all_contexts = []
+        coros.append(("club", club_search_node(state)))
+
+    results = await asyncio.gather(*[c[1] for c in coros], return_exceptions=True)
+
+    web_ctx, rag_ctx, club_ctx = [], [], []
     combined_parts = []
-    web_ctx = []
-    rag_ctx = []
-    club_ctx = []
-    
     for i, result in enumerate(results):
         if isinstance(result, Exception):
-            logger.error(f"Mixed context search error: {result}")
+            logger.error(f"Mixed context error: {result}")
             continue
-        
-        source_type = tasks[i][0]
-        
-        if source_type == "web":
+        src = coros[i][0]
+        if src == "web":
             web_ctx = result.get("web_context", [])
-            all_contexts.extend(web_ctx)
-        elif source_type == "rag":
+        elif src == "rag":
             rag_ctx = result.get("rag_context", [])
-            all_contexts.extend(rag_ctx)
-        elif source_type == "club":
+        elif src == "club":
             club_ctx = result.get("club_context", [])
-            all_contexts.extend(club_ctx)
-        
         if result.get("combined_context"):
             combined_parts.append(result["combined_context"])
-    
-    all_contexts.sort(key=lambda x: x.relevance_score, reverse=True)
+
     combined = "\n\n".join(combined_parts)[:3000]
-    
-    print(f"\n   ✅ Total mixed context gathered: {len(combined)} characters")
-    
+    print(f"\n   ✅ Mixed context: {len(combined)} chars")
     return {
         "web_context": web_ctx,
         "rag_context": rag_ctx,
         "club_context": club_ctx,
-        "combined_context": combined
+        "combined_context": combined,
     }
 
 
 # ============================================================================
-# WORKERS - ASYNC VERSIONS
+# WORKERS
 # ============================================================================
 
 GITHUB_TOOLS = [
     "create_repository", "get_file_contents", "create_or_update_file",
     "create_pull_request", "list_pull_requests", "update_pull_request",
-    "search_repositories", "get_me"
+    "search_repositories", "get_me",
 ]
 
 
-class GitHubWorker:
-    """Worker for GitHub operations - ASYNC with connection reuse"""
-    
-    async def execute(self, task: dict, context: str = "") -> TaskResult:
-        """Execute a GitHub task using cached MCP client"""
-        from langchain.agents import create_agent
-        
-        task_id = task["id"]
-        description = task.get("description", "")
-        
-        print(f"\n  🛠️ GITHUB_WORKER: Executing Task {task_id}")
-        logger.info(f"GitHub worker executing task {task_id}")
-        
-        try:
-            # Get cached client from pool
-            client = await mcp_pool.get_github_client()
-            
-            # Get tools
-            all_tools = await client.get_tools()
-            
-            # Filter to essential tools
-            filtered_tools = [tool for tool in all_tools if tool.name in GITHUB_TOOLS]
-            
-            if not filtered_tools:
-                logger.warning("No GitHub tools available")
-                return TaskResult(
-                    task_id=task_id,
-                    worker_type="github",
-                    success=False,
-                    output="No GitHub tools available",
-                    used_context=bool(context)
-                )
-            
-            # Create agent
-            agent = create_agent(llm, filtered_tools)
-            
-            # Build prompt
-            if context:
-                prompt = f"""
-GitHub Task: {description}
-
-Context from search (use if relevant):
-{context[:800]}
-
-Original query: {task.get('user_query', '')}
-
-Please use appropriate GitHub tools to complete this task.
-"""
-            else:
-                prompt = f"""
-GitHub Task: {description}
-
-Original query: {task.get('user_query', '')}
-
-Please use appropriate GitHub tools to complete this task.
-"""
-            
-            response = await agent.ainvoke({
-                "messages": [{"role": "user", "content": prompt}]
-            })
-            
-            # Extract output
-            output = ""
-            if "messages" in response:
-                for msg in reversed(response["messages"]):
-                    if hasattr(msg, 'content') and msg.content:
-                        output = msg.content
-                        break
-            
-            if not output:
-                output = str(response)
-            
-            print(f"     ✅ Task completed")
-            
-            return TaskResult(
-                task_id=task_id,
-                worker_type="github",
-                success=True,
-                output=output,
-                used_context=bool(context)
-            )
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"     ❌ Error: {error_msg[:100]}")
-            logger.error(f"GitHub task {task_id} failed: {error_msg}")
-            
-            return TaskResult(
-                task_id=task_id,
-                worker_type="github",
-                success=False,
-                output=f"GitHub operation failed: {error_msg}",
-                used_context=bool(context),
-                error=error_msg
-            )
-
-
 async def github_worker_node(payload: dict) -> dict:
-    """GitHub worker node - ASYNC"""
     task_data = payload["task"]
     context = payload.get("context", "")
-    task_data["user_query"] = payload.get("user_query", "")
-    
-    worker = GitHubWorker()
-    result = await worker.execute(task_data, context)
-    
-    return {"results": [result]}
-
-
-class GoogleWorkspaceWorker:
-    """Worker for Google Workspace - ASYNC with connection reuse"""
-    
-    async def execute(self, task: dict, context: str = "") -> TaskResult:
-        """Execute a Google Workspace task using cached MCP client"""
-        from langchain.agents import create_agent
-        
-        task_id = task["id"]
-        description = task.get("description", "")
-        google_service = task.get("google_service", "")
-        
-        print(f"\n  🚀 GOOGLE_WORKSPACE_WORKER: Executing Task {task_id}")
-        print(f"     Service: {google_service}")
-        
-        logger.info(f"Google Workspace worker executing task {task_id} for service {google_service}")
-        
-        try:
-            # Get cached client from pool
-            client = await mcp_pool.get_google_workspace_client()
-            
-            # Get tools
-            all_tools = await client.get_tools()
-            
-            if not all_tools:
-                logger.warning("No Google Workspace tools available")
-                return TaskResult(
-                    task_id=task_id,
-                    worker_type=f"google_{google_service}",
-                    success=False,
-                    output="No Google Workspace tools available. Ensure the server is running.",
-                    used_context=bool(context)
-                )
-            
-            # Filter tools by service
-            if google_service and google_service != "all_google":
-                filtered_tools = []
-                for tool in all_tools:
-                    tool_name_lower = tool.name.lower()
-                    service_lower = google_service.lower()
-                    
-                    if service_lower == "calendar":
-                        if any(keyword in tool_name_lower for keyword in ["calendar", "event"]):
-                            filtered_tools.append(tool)
-                    elif service_lower == "gmail":
-                        if service_lower in tool_name_lower:
-                            filtered_tools.append(tool)
-            else:
-                filtered_tools = all_tools
-            
-            if not filtered_tools:
-                return TaskResult(
-                    task_id=task_id,
-                    worker_type=f"google_{google_service}",
-                    success=False,
-                    output=f"No tools available for Google service: {google_service}",
-                    used_context=bool(context)
-                )
-            
-            # Create agent
-            agent = create_agent(llm, filtered_tools)
-            
-            # Build prompt
-            if context:
-                prompt = f"""
-Google Workspace Task ({google_service}): {description}
-
-Context from search (use if relevant):
-{context[:800]}
-
-Original query: {task.get('user_query', '')}
-
-Please use appropriate Google Workspace tools to complete this task.
-"""
-            else:
-                prompt = f"""
-Google Workspace Task ({google_service}): {description}
-
-Original query: {task.get('user_query', '')}
-
-Please use appropriate Google Workspace tools to complete this task.
-"""
-            
-            response = await agent.ainvoke({
-                "messages": [{"role": "user", "content": prompt}]
-            })
-            
-            # Extract output
-            output = ""
-            if "messages" in response:
-                for msg in reversed(response["messages"]):
-                    if hasattr(msg, 'content') and msg.content:
-                        output = msg.content
-                        break
-            
-            if not output:
-                output = str(response)
-            
-            print(f"     ✅ Task completed")
-            
-            return TaskResult(
-                task_id=task_id,
-                worker_type=f"google_{google_service}",
-                success=True,
-                output=output,
-                used_context=bool(context)
-            )
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"     ❌ Error: {error_msg[:100]}")
-            logger.error(f"Google Workspace task {task_id} failed: {error_msg}")
-            
-            return TaskResult(
-                task_id=task_id,
-                worker_type=f"google_{google_service}",
-                success=False,
-                output=f"Google Workspace operation failed: {error_msg}",
-                used_context=bool(context),
-                error=error_msg
-            )
+    task_id = task_data["id"]
+    print(f"\n  🛠️ GITHUB_WORKER: Task {task_id}")
+    try:
+        client = await mcp_pool.get_github_client()
+        all_tools = await client.get_tools()
+        filtered = [t for t in all_tools if t.name in GITHUB_TOOLS]
+        if not filtered:
+            return {"results": [TaskResult(task_id=task_id, worker_type="github",
+                                           success=False, output="No GitHub tools available")]}
+        agent = create_react_agent(llm, filtered)
+        prompt = (
+            f"GitHub Task: {task_data.get('description', '')}\n"
+            + (f"\nContext:\n{context[:800]}\n" if context else "")
+            + f"\nQuery: {payload.get('user_query', '')}"
+        )
+        response = await agent.ainvoke({"messages": [{"role": "user", "content": prompt}]})
+        output = next(
+            (m.content for m in reversed(response.get("messages", [])) if getattr(m, "content", None)),
+            str(response),
+        )
+        return {"results": [TaskResult(task_id=task_id, worker_type="github",
+                                       success=True, output=output, used_context=bool(context))]}
+    except Exception as exc:
+        logger.error(f"GitHub task {task_id} failed: {exc}")
+        return {"results": [TaskResult(task_id=task_id, worker_type="github",
+                                       success=False, output=f"GitHub failed: {exc}", error=str(exc))]}
 
 
 async def google_workspace_worker_node(payload: dict) -> dict:
-    """Google Workspace worker node - ASYNC"""
     task_data = payload["task"]
     context = payload.get("context", "")
-    task_data["user_query"] = payload.get("user_query", "")
-    
-    worker = GoogleWorkspaceWorker()
-    result = await worker.execute(task_data, context)
-    
-    return {"results": [result]}
-
-
-class ConversationalWorker:
-    """Worker for conversational tasks with context support"""
-    
-    async def execute(self, task: dict, user_query: str, context: str = "") -> TaskResult:
-        """Execute a conversational task - ASYNC"""
-        task_id = task["id"]
-        
-        print(f"\n  💬 CONVERSATIONAL_WORKER: Executing Task {task_id}")
-        if context:
-            print(f"     With context: {len(context)} chars")
-        
-        logger.info(f"Conversational worker executing task {task_id}")
-        
-        try:
-            if context:
-                prompt = f"""
-User Query: {user_query}
-
-Context from search:
-{context}
-
-Task: {task.get('description', 'Respond conversationally')}
-
-Please respond using this context if helpful.
-"""
-            else:
-                prompt = f"""
-User Query: {user_query}
-
-Task: {task.get('description', 'Respond conversationally')}
-
-Provide a helpful, conversational response.
-"""
-            
-            messages = [
-                SystemMessage(content="You are a helpful assistant. Provide clear, concise, and accurate responses."),
-                HumanMessage(content=prompt)
-            ]
-            
-            # Run LLM in executor
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: llm.invoke(messages)
-            )
-            
-            print(f"     ✅ Response generated")
-            
-            return TaskResult(
-                task_id=task_id,
-                worker_type="conversational",
-                success=True,
-                output=response.content,
-                used_context=bool(context)
-            )
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"     ❌ Error: {error_msg[:100]}")
-            logger.error(f"Conversational task {task_id} failed: {error_msg}")
-            
-            return TaskResult(
-                task_id=task_id,
-                worker_type="conversational",
-                success=False,
-                output=f"Failed to generate response: {error_msg}",
-                used_context=bool(context),
-                error=error_msg
-            )
+    task_id = task_data["id"]
+    google_service = task_data.get("google_service", "")
+    print(f"\n  🚀 GOOGLE_WORKER: Task {task_id} ({google_service})")
+    try:
+        client = await mcp_pool.get_google_workspace_client()
+        all_tools = await client.get_tools()
+        filtered = [
+            t for t in all_tools
+            if google_service.lower() in t.name.lower()
+            or ("event" in t.name.lower() and google_service.lower() == "calendar")
+        ] if google_service and google_service != "all_google" else all_tools
+        if not filtered:
+            return {"results": [TaskResult(task_id=task_id, worker_type=f"google_{google_service}",
+                                           success=False, output=f"No tools for: {google_service}")]}
+        agent = create_react_agent(llm, filtered)
+        prompt = (
+            f"Google Workspace Task ({google_service}): {task_data.get('description', '')}\n"
+            + (f"\nContext:\n{context[:800]}\n" if context else "")
+            + f"\nQuery: {payload.get('user_query', '')}"
+        )
+        response = await agent.ainvoke({"messages": [{"role": "user", "content": prompt}]})
+        output = next(
+            (m.content for m in reversed(response.get("messages", [])) if getattr(m, "content", None)),
+            str(response),
+        )
+        return {"results": [TaskResult(task_id=task_id, worker_type=f"google_{google_service}",
+                                       success=True, output=output, used_context=bool(context))]}
+    except Exception as exc:
+        logger.error(f"Google Workspace task {task_id} failed: {exc}")
+        return {"results": [TaskResult(task_id=task_id, worker_type=f"google_{google_service}",
+                                       success=False, output=f"Google Workspace failed: {exc}", error=str(exc))]}
 
 
 async def conversational_worker_node(payload: dict) -> dict:
-    """Conversational worker node - ASYNC"""
     task_data = payload["task"]
     user_query = payload["user_query"]
     context = payload.get("context", "")
-    
-    worker = ConversationalWorker()
-    result = await worker.execute(task_data, user_query, context)
-    
-    return {"results": [result]}
+    task_id = task_data["id"]
+    print(f"\n  💬 CONVERSATIONAL_WORKER: Task {task_id}"
+          + (f" [with {len(context)} chars context]" if context else " [no context]"))
+    try:
+        prompt = (
+            f"User Query: {user_query}\n"
+            + (f"\nRelevant context retrieved from the knowledge base:\n{context}\n" if context else "")
+            + f"\nTask: {task_data.get('description', 'Respond to the user query')}"
+        )
+        messages = [
+            SystemMessage(content="You are a helpful assistant. When context is provided, base your answer on it. Be specific and cite details from the context."),
+            HumanMessage(content=prompt),
+        ]
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, lambda: llm.invoke(messages))
+        return {"results": [TaskResult(task_id=task_id, worker_type="conversational",
+                                       success=True, output=response.content, used_context=bool(context))]}
+    except Exception as exc:
+        logger.error(f"Conversational task {task_id} failed: {exc}")
+        return {"results": [TaskResult(task_id=task_id, worker_type="conversational",
+                                       success=False, output=f"Failed: {exc}", error=str(exc))]}
 
 
 # ============================================================================
-# TASK EXECUTOR & AGGREGATOR
+# TASK EXECUTOR — always pass context to workers when it exists
 # ============================================================================
+
 
 def fanout_to_workers(state: OrchestratorState):
-    """Execute tasks, providing context where needed"""
-    print(f"\n⚡ EXECUTING TASKS")
-    print("="*40)
-    
-    logger.info(f"Fanning out {len(state['tasks'])} tasks to workers")
-    
-    sends = []
+    """
+    Fan out tasks to workers.
+
+    Context injection rule: always inject combined_context into the
+    worker payload when it is non-empty — regardless of task.requires_context.
+    The old flag-based approach silently dropped context because the planner
+    didn't reliably set it. Workers ignore the context if it's empty, so
+    always passing it is harmless and correct.
+    """
     context = state.get("combined_context", "")
-    
+    sends = []
     for task in state["tasks"]:
         payload = {
             "task": task.model_dump(),
-            "user_query": state["user_query"]
+            "user_query": state["user_query"],
         }
-        
-        if task.requires_context and context:
+        # Always inject context when available — this is the core fix
+        if context:
             payload["context"] = context
-        
+
         if task.worker_type == "github":
             sends.append(Send("github_worker", payload))
         elif task.worker_type.startswith("google_") or task.google_service:
             sends.append(Send("google_workspace_worker", payload))
         else:
             sends.append(Send("conversational_worker", payload))
-    
     return sends
 
 
 async def results_aggregator_node(state: OrchestratorState) -> dict:
-    """Aggregate results from all workers - ASYNC"""
     results = state.get("results", [])
-    
-    print("\n" + "="*60)
-    print("📦 AGGREGATING RESULTS")
-    print("="*60)
-    
-    print(f"Total tasks executed: {len(results)}")
-    
+    print("\n" + "=" * 60)
+    print(f"📦 AGGREGATING {len(results)} RESULT(S)")
+    print("=" * 60)
+
     if not results:
         return {"final_response": "No tasks were executed."}
-    
     if len(results) == 1:
         return {"final_response": results[0].output}
-    
-    results_text = "\n\n".join([
-        f"[{r.worker_type.upper()}] {r.output[:400]}..."
-        for r in results
-    ])
-    
-    prompt = f"""
-Original Query: {state['user_query']}
 
-Results from different workers:
-{results_text}
-
-Provide a coherent final response that addresses the user's original query.
-"""
-    
-    messages = [
-        SystemMessage(content="You are a helpful assistant that integrates results from multiple sources."),
-        HumanMessage(content=prompt)
-    ]
-    
-    # Run LLM in executor
+    results_text = "\n\n".join(
+        f"[{r.worker_type.upper()}] {r.output[:400]}…" for r in results
+    )
+    prompt = (
+        f"Original Query: {state['user_query']}\n\n"
+        f"Results from workers:\n{results_text}\n\n"
+        "Provide a coherent final response."
+    )
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
         None,
-        lambda: llm.invoke(messages)
+        lambda: llm.invoke([
+            SystemMessage(content="Integrate results from multiple sources helpfully."),
+            HumanMessage(content=prompt),
+        ]),
     )
-    
     return {"final_response": response.content}
 
 
@@ -1252,10 +775,10 @@ Provide a coherent final response that addresses the user's original query.
 # BUILD GRAPH
 # ============================================================================
 
+
 def build_smart_orchestrator():
-    """Build the intelligent graph"""
     g = StateGraph(OrchestratorState)
-    
+
     g.add_node("planning", planning_agent_node)
     g.add_node("web_search", web_search_node)
     g.add_node("rag_search", rag_search_node)
@@ -1266,9 +789,8 @@ def build_smart_orchestrator():
     g.add_node("google_workspace_worker", google_workspace_worker_node)
     g.add_node("conversational_worker", conversational_worker_node)
     g.add_node("aggregator", results_aggregator_node)
-    
+
     g.add_edge(START, "planning")
-    
     g.add_conditional_edges(
         "planning",
         route_after_planning,
@@ -1277,74 +799,48 @@ def build_smart_orchestrator():
             "rag_search": "rag_search",
             "club_search": "club_search",
             "gather_mixed_context": "gather_mixed_context",
-            "execute_tasks": "execute_tasks"
-        }
+            "execute_tasks": "execute_tasks",
+        },
     )
-    
-    g.add_edge("web_search", "execute_tasks")
-    g.add_edge("rag_search", "execute_tasks")
-    g.add_edge("club_search", "execute_tasks")
-    g.add_edge("gather_mixed_context", "execute_tasks")
-    
+    for ctx_node in ("web_search", "rag_search", "club_search", "gather_mixed_context"):
+        g.add_edge(ctx_node, "execute_tasks")
+
     g.add_conditional_edges(
         "execute_tasks",
-        fanout_to_workers, 
+        fanout_to_workers,
         {
             "github_worker": "github_worker",
             "google_workspace_worker": "google_workspace_worker",
-            "conversational_worker": "conversational_worker"
-        }
+            "conversational_worker": "conversational_worker",
+        },
     )
-    
-    g.add_edge("github_worker", "aggregator")
-    g.add_edge("google_workspace_worker", "aggregator")
-    g.add_edge("conversational_worker", "aggregator")
+    for worker in ("github_worker", "google_workspace_worker", "conversational_worker"):
+        g.add_edge(worker, "aggregator")
     g.add_edge("aggregator", END)
-    
+
     return g.compile()
 
 
 # ============================================================================
-# ORCHESTRATOR CLASS - PRODUCTION ASYNC VERSION
+# ORCHESTRATOR CLASS
 # ============================================================================
 
+
 class SmartOrchestrator:
-    """Smart orchestrator with MCP client pooling - PRODUCTION ASYNC"""
-    
     def __init__(self):
         self.graph = build_smart_orchestrator()
-        print("\n" + "="*60)
-        print("✅ ENHANCED SMART ORCHESTRATOR INITIALIZED (ASYNC)")
-        print("="*60)
-        print("🔧 Performance Improvements:")
-        print("  • MCP client connection pooling")
-        print("  • Clients initialized once and reused")
-        print("  • Reduced connection overhead")
-        print("  • Better resource management")
-        print("  • Fully async execution")
-        print("\n📋 Features:")
-        print("  • Wikipedia web search")
-        print("  • RAG search (internal docs)")
-        print("  • Club search (club info)")
-        print("  • Mixed context support")
-        print("  • GitHub worker")
-        print("  • Google Workspace worker")
-        print("  • Conversational worker")
-        print("="*60)
-        logger.info("SmartOrchestrator initialized with async execution")
-    
+        print("\n" + "=" * 60)
+        print("✅ SMART ORCHESTRATOR INITIALISED (ASYNC)")
+        print("=" * 60)
+        rag = get_rag_retrieval_service()
+        print(f"   User RAG  : {'✅ ready' if rag else '❌ unavailable (check .env)'}")
+        print("   Club RAG  : ✅ lazy (loads on first club query)")
+        print("=" * 60)
+
     async def process(self, user_query: str, conversation_history: List[str] = None) -> dict:
-        """Process a query through the orchestrator - FULLY ASYNC"""
-        print(f"\n🚀 PROCESSING: {user_query}")
-        logger.info(f"Processing query: {user_query}")
-        
         if not user_query or not user_query.strip():
-            return {
-                "success": False,
-                "response": "Please provide a valid query.",
-                "metadata": {"error": "Empty query"}
-            }
-        
+            return {"success": False, "response": "Please provide a valid query.", "metadata": {}}
+
         initial_state: OrchestratorState = {
             "user_query": user_query.strip(),
             "conversation_history": conversation_history or [],
@@ -1355,66 +851,46 @@ class SmartOrchestrator:
             "combined_context": "",
             "tasks": [],
             "results": [],
-            "final_response": ""
+            "final_response": "",
         }
-        
+
         try:
-            # ✅ ASYNC: Use ainvoke instead of invoke
             final_state = await self.graph.ainvoke(initial_state)
-            
-            print("\n" + "="*60)
-            print("🎉 PROCESSING COMPLETE!")
-            print("="*60)
-            
             results = final_state.get("results", [])
             successful = [r for r in results if r.success]
-            used_context = [r for r in results if r.used_context]
-            
             return {
                 "success": True,
                 "response": final_state["final_response"],
                 "metadata": {
                     "total_tasks": len(results),
                     "successful_tasks": len(successful),
-                    "tasks_with_context": len(used_context),
-                    "web_search_used": len(final_state.get("web_context", [])) > 0,
-                    "rag_search_used": len(final_state.get("rag_context", [])) > 0,
-                    "club_search_used": len(final_state.get("club_context", [])) > 0,
-                    "workers_used": list(set([r.worker_type for r in results]))
-                }
+                    "web_search_used": bool(final_state.get("web_context")),
+                    "rag_search_used": bool(final_state.get("rag_context")),
+                    "club_search_used": bool(final_state.get("club_context")),
+                    "workers_used": list({r.worker_type for r in results}),
+                },
             }
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"\n❌ Error: {error_msg}")
-            logger.error(f"Processing error: {error_msg}", exc_info=True)
-            
-            return {
-                "success": False,
-                "response": f"Orchestrator error: {error_msg}",
-                "metadata": {"error": error_msg}
-            }
-    
+        except Exception as exc:
+            logger.error(f"Orchestrator error: {exc}", exc_info=True)
+            return {"success": False, "response": f"Orchestrator error: {exc}", "metadata": {}}
+
     async def cleanup(self):
-        """Cleanup MCP connections - ASYNC"""
         await mcp_pool.cleanup()
 
 
 # ============================================================================
-# INTERACTIVE MODE (CLI)
+# CLI
 # ============================================================================
 
+
 def interactive_mode():
-    """Interactive mode - CLI wrapper around async orchestrator"""
-    print("\n" + "="*60)
-    print("🤖 ENHANCED SMART ORCHESTRATOR (PRODUCTION ASYNC)")
-    print("="*60)
-    print("✨ Now with full async execution for better performance!")
-    print("="*60)
-    
-    orchestrator = SmartOrchestrator()
-    conversation = []
-    
+    print("\n" + "=" * 60)
+    print("🤖 SMART ORCHESTRATOR — CLI")
+    print("=" * 60)
+
+    orch = SmartOrchestrator()
+    conversation: List[str] = []
+
     try:
         while True:
             try:
@@ -1422,46 +898,29 @@ def interactive_mode():
             except (EOFError, KeyboardInterrupt):
                 print("\n\n👋 Goodbye!")
                 break
-            
             if not query:
                 continue
-                
-            if query.lower() in ['quit', 'exit', 'q']:
+            if query.lower() in {"quit", "exit", "q"}:
                 print("\n👋 Goodbye!")
                 break
-            
-            # Run async process in sync CLI context
-            result = asyncio.run(orchestrator.process(query, conversation))
-            
+
+            result = asyncio.run(orch.process(query, conversation))
             conversation.append(f"User: {query}")
             if result["success"]:
-                conversation.append(f"Assistant: {result['response'][:100]}...")
-            
-            print(f"\n{'='*60}")
-            print("🤖 FINAL RESPONSE:")
-            print(f"{'='*60}")
-            print(result["response"])
-            print(f"{'='*60}")
-            
-            if result["success"]:
-                meta = result["metadata"]
-                print(f"\n📊 Metadata:")
-                print(f"  Workers: {', '.join(meta['workers_used'])}")
-                print(f"  Tasks: {meta['total_tasks']} total, {meta['successful_tasks']} successful")
-    
-    finally:
-        print("\n🧹 Cleaning up connections...")
-        asyncio.run(orchestrator.cleanup())
-        print("✅ Cleanup complete")
+                conversation.append(f"Assistant: {result['response'][:100]}…")
 
+            print(f"\n{'='*60}\n🤖 RESPONSE:\n{'='*60}")
+            print(result["response"])
+            print("=" * 60)
+            if result["success"]:
+                m = result["metadata"]
+                print(f"\n📊 workers={m['workers_used']}  "
+                      f"rag={m['rag_search_used']}  club={m['club_search_used']}")
+    finally:
+        asyncio.run(orch.cleanup())
+
+
+orchestrator = SmartOrchestrator()
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        # Run tests
-        pass
-    else:
-        interactive_mode()
-        
-orchestrator = SmartOrchestrator()
+    interactive_mode()
