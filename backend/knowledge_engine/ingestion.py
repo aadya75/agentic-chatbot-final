@@ -1,13 +1,13 @@
 """
 Document Ingestion Service
-Handles PDF processing, chunking, and indexing into Supabase
+Handles PDF processing, chunking, and indexing into Supabase (no local storage)
 """
 
 import uuid
-import shutil
-from pathlib import Path
+import io
 from typing import Dict, Optional, Callable
 import PyPDF2
+from supabase import create_client
 
 from .embedding_service import EmbeddingService
 from .vector_store import SupabaseVectorStore
@@ -18,19 +18,20 @@ from .chunking import DocumentChunker
 class DocumentIngestion:
     """
     Full ingestion pipeline: PDF -> chunks -> embeddings -> Supabase
+    No local file storage - everything goes to Supabase
     """
 
     def __init__(
         self,
-        upload_dir: str,
         supabase_url: str,
         supabase_key: str,
+        supabase_bucket: str,
         embedding_service: EmbeddingService,
         chunker: DocumentChunker,
         graph_store: Optional[GraphStore] = None,
     ):
-        self.upload_dir = Path(upload_dir)
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.supabase = create_client(supabase_url, supabase_key)
+        self.supabase_bucket = supabase_bucket
 
         self.vector_store = SupabaseVectorStore(
             supabase_url=supabase_url,
@@ -48,21 +49,23 @@ class DocumentIngestion:
 
     def process_pdf(
         self,
-        file_path: str,
+        file_bytes: bytes,
         filename: str,
         progress_callback: Optional[Callable[[str, int], None]] = None,
         user_id: Optional[str] = None,
         paper_id: Optional[str] = None,
+        storage_path: Optional[str] = None,
     ) -> Dict:
         """
         Process a PDF file and store it in Supabase.
 
         Args:
-            file_path: Path to the PDF file
+            file_bytes: PDF file content as bytes
             filename: Original filename
             progress_callback: Optional callback(status, progress_percent)
             user_id: Owner of this document (Supabase per-user filtering)
             paper_id: Pre-generated UUID; auto-generated if omitted
+            storage_path: Path in Supabase Storage where file will be stored
 
         Returns:
             Result dict with keys: success, paper_id, filename, chunks_created, message
@@ -74,7 +77,7 @@ class DocumentIngestion:
             if progress_callback:
                 progress_callback("Extracting text from PDF", 10)
 
-            text = self._extract_text_from_pdf(file_path)
+            text = self._extract_text_from_bytes(file_bytes)
             if not text or len(text.strip()) < 100:
                 raise ValueError("PDF contains insufficient text")
 
@@ -98,10 +101,19 @@ class DocumentIngestion:
             self.vector_store.add_documents(embeddings, chunks, paper_id, user_id=user_id)
 
             if progress_callback:
-                progress_callback("Saving PDF", 85)
+                progress_callback("Saving to Supabase Storage", 85)
 
-            saved_path = self.upload_dir / f"{paper_id}.pdf"
-            shutil.copy(file_path, saved_path)
+            # Upload to Supabase Storage
+            if storage_path:
+                try:
+                    self.supabase.storage.from_(self.supabase_bucket).upload(
+                        storage_path,
+                        file_bytes,
+                        {"content-type": "application/pdf"}
+                    )
+                    print(f"✅ File uploaded to storage: {storage_path}")
+                except Exception as e:
+                    print(f"⚠️ Storage upload warning: {e}")
 
             if self.graph_store and self.graph_store.enabled:
                 if progress_callback:
@@ -128,17 +140,20 @@ class DocumentIngestion:
                 "message": f"Failed to process {filename}: {str(e)}",
             }
 
-    def delete_document(self, paper_id: str) -> Dict:
-        """Delete a document and all its chunks from Supabase + local disk."""
+    def delete_document(self, paper_id: str, storage_path: Optional[str] = None) -> Dict:
+        """Delete a document and all its chunks from Supabase."""
         try:
             self.vector_store.delete_paper(paper_id)
 
             if self.graph_store and self.graph_store.enabled:
                 self.graph_store.delete_paper(paper_id)
 
-            pdf_path = self.upload_dir / f"{paper_id}.pdf"
-            if pdf_path.exists():
-                pdf_path.unlink()
+            # Delete from Supabase Storage
+            if storage_path:
+                try:
+                    self.supabase.storage.from_(self.supabase_bucket).remove([storage_path])
+                except Exception as e:
+                    print(f"Failed to delete from storage: {e}")
 
             return {
                 "success": True,
@@ -153,31 +168,14 @@ class DocumentIngestion:
                 "message": f"Failed to delete document {paper_id}: {str(e)}",
             }
 
-    def get_document_info(self, paper_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
-        """
-        Look up a document record in Supabase.
-
-        Returns a dict with paper_id, filename, pdf_path — or None if not found.
-        """
-        papers = self.vector_store.get_all_papers(user_id=user_id)
-        for paper in papers:
-            if isinstance(paper, dict) and paper.get("id") == paper_id:
-                pdf_path = self.upload_dir / f"{paper_id}.pdf"
-                return {
-                    "paper_id": paper_id,
-                    "filename": paper.get("filename", "unknown"),
-                    "pdf_path": str(pdf_path) if pdf_path.exists() else None,
-                }
-        return None
-
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _extract_text_from_pdf(self, file_path: str) -> str:
+    def _extract_text_from_bytes(self, file_bytes: bytes) -> str:
         text = ""
         try:
-            with open(file_path, "rb") as f:
+            with io.BytesIO(file_bytes) as f:
                 reader = PyPDF2.PdfReader(f)
                 for page in reader.pages:
                     page_text = page.extract_text()

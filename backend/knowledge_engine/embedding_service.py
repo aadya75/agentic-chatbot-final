@@ -44,18 +44,18 @@ class EmbeddingService:
     # Public API
     # ------------------------------------------------------------------
 
-    def embed_text(self, text: str) -> np.ndarray:
+    def embed_text(self, text: str) -> List[float]:
         """
-        Generate a (384,) float32 embedding for a single text.
+        Generate a (384,) embedding for a single text as a Python list.
 
         Args:
             text: Input string (may be empty — returns zero vector).
 
         Returns:
-            np.ndarray of shape (384,), dtype float32, unit-normalised.
+            List[float] of length 384, unit-normalised.
         """
         if not text or not text.strip():
-            return np.zeros(self.embedding_dim, dtype=np.float32)
+            return [0.0] * self.embedding_dim
 
         model = self._get_model()
         embedding = model.encode(
@@ -64,20 +64,21 @@ class EmbeddingService:
             normalize_embeddings=True,   # unit-norm → cosine ≡ dot product
             show_progress_bar=False,
         )
-        return embedding.astype(np.float32)
+        # Convert numpy array to list for JSON serialization
+        return embedding.astype(np.float32).tolist()
 
-    def embed_texts(self, texts: List[str]) -> np.ndarray:
+    def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """
-        Generate a (N, 384) float32 embedding matrix for a list of texts.
+        Generate embeddings for a list of texts as Python lists.
 
         Args:
             texts: List of input strings.
 
         Returns:
-            np.ndarray of shape (N, 384), dtype float32, unit-normalised.
+            List[List[float]] of shape (N, 384), unit-normalised.
         """
         if not texts:
-            return np.zeros((0, self.embedding_dim), dtype=np.float32)
+            return []
 
         model = self._get_model()
         embeddings = model.encode(
@@ -87,7 +88,8 @@ class EmbeddingService:
             show_progress_bar=False,
             batch_size=64,
         )
-        return embeddings.astype(np.float32)
+        # Convert numpy array to list of lists for JSON serialization
+        return embeddings.astype(np.float32).tolist()
 
     def get_embedding_dimension(self) -> int:
         """Return the embedding dimension (always 384)."""

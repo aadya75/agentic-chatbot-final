@@ -1,0 +1,354 @@
+/* frontend/src/Components/UploadDocs.css */
+
+.upload-docs-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s;
+    margin-right: 12px;
+}
+
+.upload-docs-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.upload-icon {
+    font-size: 18px;
+}
+
+.upload-docs-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+.upload-docs-dialog {
+    background: white;
+    border-radius: 16px;
+    width: 90%;
+    max-width: 500px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    animation: slideUp 0.3s ease;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.dialog-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+.dialog-header h3 {
+    margin: 0;
+    font-size: 20px;
+    color: #333;
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    font-size: 28px;
+    cursor: pointer;
+    color: #999;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    transition: all 0.2s;
+}
+
+.close-btn:hover {
+    background: #f0f0f0;
+    color: #333;
+}
+
+.dialog-body {
+    flex: 1;
+    padding: 24px;
+    min-height: 200px;
+}
+
+.file-select-area {
+    text-align: center;
+}
+
+.file-select-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    border: 2px dashed #cbd5e0;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.file-select-label:hover {
+    border-color: #667eea;
+    background: #f7fafc;
+}
+
+.upload-icon-large {
+    font-size: 48px;
+    margin-bottom: 16px;
+}
+
+.file-select-label p {
+    margin: 8px 0;
+    color: #4a5568;
+}
+
+.file-hint {
+    font-size: 12px;
+    color: #a0aec0;
+}
+
+.file-preview {
+    animation: fadeIn 0.3s ease;
+}
+
+.file-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+    background: #f7fafc;
+    border-radius: 12px;
+    margin-bottom: 20px;
+}
+
+.file-icon {
+    font-size: 32px;
+}
+
+.file-details {
+    flex: 1;
+}
+
+.file-name {
+    margin: 0;
+    font-weight: 500;
+    color: #2d3748;
+    word-break: break-all;
+}
+
+.file-size {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: #718096;
+}
+
+.remove-file-btn {
+    padding: 6px 12px;
+    background: #fed7d7;
+    color: #c53030;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.2s;
+}
+
+.remove-file-btn:hover:not(:disabled) {
+    background: #feb2b2;
+}
+
+.remove-file-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.upload-progress {
+    margin-top: 16px;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 8px;
+    background: #e2e8f0;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    transition: width 0.3s ease;
+    border-radius: 4px;
+}
+
+.progress-text {
+    text-align: center;
+    margin-top: 8px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #4a5568;
+}
+
+.chunks-info {
+    text-align: center;
+    margin-top: 8px;
+    font-size: 11px;
+    color: #667eea;
+}
+
+.upload-error {
+    margin-top: 12px;
+    padding: 8px 12px;
+    background: #fee;
+    border: 1px solid #fcc;
+    border-radius: 6px;
+    color: #c33;
+    font-size: 12px;
+}
+
+.dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    padding: 16px 24px;
+    border-top: 1px solid #e0e0e0;
+}
+
+.cancel-btn {
+    padding: 10px 20px;
+    background: #f0f0f0;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s;
+}
+
+.cancel-btn:hover:not(:disabled) {
+    background: #e0e0e0;
+}
+
+.cancel-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.upload-btn {
+    padding: 10px 24px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+
+.upload-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.upload-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+@media (max-width: 768px) {
+    .upload-docs-dialog {
+        width: 95%;
+        max-height: 90vh;
+    }
+    
+    .dialog-header {
+        padding: 16px 20px;
+    }
+    
+    .dialog-header h3 {
+        font-size: 18px;
+    }
+    
+    .dialog-body {
+        padding: 20px;
+    }
+    
+    .file-select-label {
+        padding: 30px 16px;
+    }
+    
+    .upload-icon-large {
+        font-size: 40px;
+    }
+    
+    .file-info {
+        flex-wrap: wrap;
+    }
+    
+    .remove-file-btn {
+        width: 100%;
+        margin-top: 8px;
+    }
+    
+    .dialog-footer {
+        padding: 12px 20px;
+    }
+    
+    .cancel-btn, .upload-btn {
+        padding: 8px 16px;
+        font-size: 13px;
+    }
+}
+
+/* Add to UploadDocs.css */
+.error-message {
+    background: #fee;
+    border: 1px solid #fcc;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 16px;
+    color: #c33;
+    font-size: 14px;
+    text-align: center;
+}

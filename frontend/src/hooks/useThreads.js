@@ -2,18 +2,12 @@
 import { useState, useCallback, useEffect } from 'react';
 import { apiService } from '../api/services';
 
-/**
- * Hook for managing chat threads
- */
 export function useThreads() {
   const [threads, setThreads] = useState([]);
   const [currentThreadId, setCurrentThreadId] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  /**
-   * Load all threads from backend
-   */
   const loadThreads = useCallback(async () => {
     setIsLoading(true);
     setError(null);
@@ -21,7 +15,6 @@ export function useThreads() {
     try {
       const threadList = await apiService.listThreads();
       
-      // Enhance threads with preview from messages
       const enhancedThreads = await Promise.all(
         threadList.map(async (thread) => {
           try {
@@ -48,7 +41,6 @@ export function useThreads() {
         })
       );
 
-      // Sort by most recent first
       enhancedThreads.sort((a, b) => 
         new Date(b.timestamp) - new Date(a.timestamp)
       );
@@ -62,9 +54,6 @@ export function useThreads() {
     }
   }, []);
 
-  /**
-   * Create a new thread
-   */
   const createThread = useCallback(async () => {
     try {
       const result = await apiService.createThread();
@@ -92,25 +81,18 @@ export function useThreads() {
     }
   }, []);
 
-  /**
-   * Delete a thread
-   */
   const deleteThread = useCallback(async (threadId) => {
     try {
       await apiService.deleteThread(threadId);
       
-      // Remove from list
       setThreads(prev => prev.filter(t => t.id !== threadId));
       
-      // If deleting current thread, switch to another or create new
       if (currentThreadId === threadId) {
         const remainingThreads = threads.filter(t => t.id !== threadId);
         
         if (remainingThreads.length > 0) {
-          // Switch to most recent thread
           setCurrentThreadId(remainingThreads[0].id);
         } else {
-          // Create a new thread
           const newThreadId = await createThread();
           setCurrentThreadId(newThreadId);
         }
@@ -124,16 +106,10 @@ export function useThreads() {
     }
   }, [currentThreadId, threads, createThread]);
 
-  /**
-   * Select a thread
-   */
   const selectThread = useCallback((threadId) => {
     setCurrentThreadId(threadId);
   }, []);
 
-  /**
-   * Update thread after new message
-   */
   const updateThreadPreview = useCallback((threadId, message) => {
     setThreads(prev => prev.map(thread => {
       if (thread.id === threadId) {
@@ -148,25 +124,19 @@ export function useThreads() {
       return thread;
     }));
 
-    // Re-sort threads
     setThreads(prev => [...prev].sort((a, b) => 
       new Date(b.timestamp) - new Date(a.timestamp)
     ));
   }, []);
 
-  /**
-   * Get current thread
-   */
   const getCurrentThread = useCallback(() => {
     return threads.find(t => t.id === currentThreadId);
   }, [threads, currentThreadId]);
 
-  // Load threads on mount
   useEffect(() => {
     loadThreads();
   }, [loadThreads]);
 
-  // Auto-create first thread if none exist
   useEffect(() => {
     if (!isLoading && threads.length === 0 && !currentThreadId) {
       createThread();
@@ -174,13 +144,10 @@ export function useThreads() {
   }, [isLoading, threads.length, currentThreadId, createThread]);
 
   return {
-    // State
     threads,
     currentThreadId,
     isLoading,
     error,
-    
-    // Actions
     loadThreads,
     createThread,
     deleteThread,

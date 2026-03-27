@@ -1,46 +1,74 @@
-# Core FastAPI dependencies
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-pydantic==2.5.3
-pydantic-settings==2.1.0
-python-dotenv==1.0.0
-
-# LangChain and AI
-langchain
-langgraph
+# =============================================================================
+# Core FastAPI & server
+# =============================================================================
+fastapi
+uvicorn[standard]
+pydantic
 pydantic-settings
-langchain-groq==0.0.1
-langchain-mcp-adapters==0.1.0
+python-dotenv
 
-# Google API libraries
+# =============================================================================
+# LangChain / LangGraph / LLM
+# =============================================================================
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
+langgraph>=0.1.0
+langchain-groq>=0.1.0
+langchain-mcp-adapters>=0.1.0
+
+# =============================================================================
+# Embedding (replaces the old hash stub)
+# =============================================================================
+sentence-transformers>=2.7.0   # all-MiniLM-L6-v2  — 384-dim semantic embeddings
+
+# =============================================================================
+# Supabase (vector store for both RAGs)
+# =============================================================================
+supabase>=2.3.0
+
+# =============================================================================
+# Google APIs (Drive, Auth — for Club RAG ingestion pipeline)
+# =============================================================================
 google-auth==2.27.0
 google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
 google-api-python-client==2.115.0
 
+# =============================================================================
 # MCP (Model Context Protocol)
-mcp==0.1.0
+# =============================================================================
+mcp>=1.0.0
 
-# Async support
-aiofiles==23.2.1
-httpx==0.26.0
+# =============================================================================
+# Document parsing
+# =============================================================================
+PyPDF2>=3.0.0          # user RAG PDF text extraction
+pypdf>=5.1.0           # club RAG PDF parsing
+python-docx>=1.1.2     # club RAG DOCX parsing
+markdown>=3.7
 
-# Testing (optional but recommended)
-pytest==7.4.4
-pytest-asyncio==0.23.3
+# =============================================================================
+# Utilities
+# =============================================================================
+numpy>=1.26.0
+aiofiles>=23.2.1
+httpx>=0.26.0
 
-# Development tools (optional)
-black==24.1.1  # Code formatter
-flake8==7.0.0  # Linter
-mypy==1.8.0    # Type checker
+# =============================================================================
+# Neo4j (optional citation graph — leave out if not using)
+# =============================================================================
+neo4j>=5.0.0
 
+# =============================================================================
+# Dev / testing (optional)
+# =============================================================================
+pytest>=7.4.4
+pytest-asyncio>=0.23.3
+black>=24.1.1
+flake8>=7.0.0
 
-faiss-cpu
-numpy
-PyPDF2
-neo4j
-
-# Document Processing (if needed for your retrieval)
-pypdf==5.1.0
-python-docx==1.1.2
-markdown==3.7
+# =============================================================================
+# REMOVED (no longer needed after Supabase migration)
+# =============================================================================
+# faiss-cpu   ← replaced by Supabase pgvector
