@@ -4,10 +4,22 @@ agentic-chatbot/
 │   ├── mcp_servers/                    # All MCP servers
 │   │   ├── __init__.py
 │   │   ├── gmail_server.py
-│   │   ├── google_drive_server.py
 │   │   ├── google_calendar_server.py
-│   │   
+│   │   └── research_rag_server.py     # NEW: MCP server for RAG
 │   │
+|   |--- orchstration/                # langraph workflow orchestration
+|   |
+│   ├── knowledge_engine/              # NEW: Embedded RAG system
+│   │   ├── __init__.py
+│   │   ├── embedding_service.py       # Hash-based 384-dim embeddings
+│   │   ├── vector_store.py            # FAISS vector search
+│   │   ├── chunking.py                # Document chunking
+│   │   ├── ingestion.py               # PDF processing
+│   │   └── retrieval.py               # Hybrid retrieval   
+│   |── data/                          # NEW: Data storage
+│   │   ├── uploads/                   # PDF files
+│   │   ├── indices/                   # FAISS indices
+│   │   └── metadata/                  # Metadata JSON
 │   ├── core/                           # Core backend logic
 │   │   ├── __init__.py
 │   │   ├── agent.py                    # Agent initialization and management
@@ -22,6 +34,7 @@ agentic-chatbot/
 │   │   │   ├── chat.py                 # Chat endpoints
 │   │   │   ├── health.py               # Health check endpoints
 │   │   │   └── tools.py                # Tool management endpoints
+│   │   │   └── knowledge.py           # NEW: Resource management API
 │   │   ├── models/
 │   │   │   ├── __init__.py
 │   │   │   ├── request.py              # Request models
@@ -116,3 +129,16 @@ agentic-chatbot/
 │
 ├── .gitignore                          # Git ignore file
 ├── README.md                           # Project overview
+
+
+When you do add real authentication, the two things you need to change are:
+1. get_current_user() in knowledge.py — replace the stub with your real auth (JWT decode, session lookup, etc.):
+pythonasync def get_current_user(token: str = Header(...)) -> Dict:
+    # decode JWT, look up session, etc.
+    return {"user_id": decoded_user_id}
+2. RagSearchProvider in wow_orchestration.py — pass user_id through the orchestrator state so searches are scoped per user:
+python# In OrchestratorState, add:
+user_id: Optional[str]
+
+# In RagSearchProvider.search(), use:
+retrieval_service.retrieve(query=query, top_k=5, user_id=state["user_id"])
