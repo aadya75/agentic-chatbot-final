@@ -30,10 +30,10 @@ supabase>=2.3.0
 # =============================================================================
 # Google APIs (Drive, Auth — for Club RAG ingestion pipeline)
 # =============================================================================
-google-auth==2.27.0
-google-auth-oauthlib==1.2.0
-google-auth-httplib2==0.2.0
-google-api-python-client==2.115.0
+google-auth>=2.27.0
+google-auth-oauthlib>=1.2.2
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.115.0
 
 # =============================================================================
 # MCP (Model Context Protocol)
@@ -54,6 +54,7 @@ markdown>=3.7
 numpy>=1.26.0
 aiofiles>=23.2.1
 httpx>=0.26.0
+wikipedia>=1.4.0
 
 # =============================================================================
 # Neo4j (optional citation graph — leave out if not using)
@@ -69,6 +70,8 @@ black>=24.1.1
 flake8>=7.0.0
 
 # =============================================================================
-# REMOVED (no longer needed after Supabase migration)
+# Auth
 # =============================================================================
-# faiss-cpu   ← replaced by Supabase pgvector
+langgraph-cli[inmem]>=0.4.19
+wikipedia>=1.4.0
+workspace-mcp>=1.17.1

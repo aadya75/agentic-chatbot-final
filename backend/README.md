@@ -82,7 +82,7 @@ uvicorn backend.api.main:app --reload --host 0.0.0.0 --port 8000
 python -m backend.api.main
 ```
 
-Server will start at: `http://localhost:8000`
+Server will start at: `http://localhost:8001`
 
 ## 📚 API Documentation
 
