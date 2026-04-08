@@ -264,7 +264,7 @@ class OrchestratorState(TypedDict):
 # ============================================================================
 
 llm = ChatGroq(
-    model="moonshotai/kimi-k2-instruct-0905",
+    model="meta-llama/llama-4-scout-17b-16e-instruct",
     temperature=0.1,
     api_key=os.getenv("GROQ_API_KEY"),
 )

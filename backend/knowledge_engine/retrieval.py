@@ -1,10 +1,10 @@
+# backend/knowledge_engine/retrieval.py
 """
 Hybrid Retrieval Service
 Combines vector search with optional citation graph
 """
 
 from typing import List, Dict, Optional
-import numpy as np
 
 from .embedding_service import EmbeddingService
 from .vector_store import SupabaseVectorStore
@@ -29,34 +29,31 @@ class HybridRetrieval:
     def retrieve(
         self,
         query: str,
-        top_k: int = 5,
+        top_k: int = 10,  # Increased from 5
         include_citations: bool = False,
         filter_paper_id: Optional[List[str]] = None,
         user_id: Optional[str] = None,
     ) -> Dict:
         """
         Retrieve relevant chunks for a query.
-
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            include_citations: Whether to include citation information
-            filter_paper_id: Optional list of paper IDs to filter results
-            user_id: Optional user ID for Supabase row-level filtering
-
-        Returns:
-            Dictionary with chunks and optional citation info
         """
         # Generate query embedding
         query_embedding = self.embedding_service.embed_text(query)
+        
+        print(f"🔍 RAG Search: query='{query[:50]}...'")
+        print(f"   User ID: {user_id}")
+        print(f"   Paper filter: {filter_paper_id}")
 
-        # Vector search — pass user_id through so Supabase can filter per-user
-        results = self.vector_store.search(
+        # Vector search
+        paper_id_filter = filter_paper_id[0] if filter_paper_id else None
+        results = self.vector_store.search_similar(
             query_embedding,
-            k=top_k,
+            top_k=top_k,
             user_id=user_id,
-            filter_paper_id=filter_paper_id[0] if filter_paper_id else None,
+            paper_id_filter=paper_id_filter,
         )
+        
+        print(f"   Found {len(results)} chunks")
 
         response = {
             "query": query,
@@ -68,13 +65,15 @@ class HybridRetrieval:
 
         for result in results:
             chunk_data = {
-                "text": result["chunk"]["text"],
-                "score": result["score"],
-                "metadata": result["chunk"]["metadata"],
-                "paper_id": result["paper_id"],
+                "text": result.get("chunk_text", ""),
+                "score": result.get("similarity", 0.0),
+                "metadata": result.get("metadata", {}),
+                "paper_id": result.get("paper_id", ""),
+                "chunk_index": result.get("chunk_index", 0)
             }
             response["chunks"].append(chunk_data)
-            seen_papers.add(result["paper_id"])
+            if result.get("paper_id"):
+                seen_papers.add(result["paper_id"])
 
         # Add citation information if requested
         if include_citations and self.graph_store and self.graph_store.enabled:
@@ -87,25 +86,16 @@ class HybridRetrieval:
     def get_all_resources(self, user_id: Optional[str] = None) -> List[Dict]:
         """
         Get list of all indexed resources.
-
-        Args:
-            user_id: Optional user filter (Supabase only)
-
-        Returns:
-            List of resource dictionaries
         """
         papers = self.vector_store.get_all_papers(user_id=user_id)
 
         resources = []
         for paper in papers:
-            # Supabase returns full paper dicts; FAISS returns bare IDs.
-            if isinstance(paper, dict):
-                resources.append({
-                    "paper_id": paper.get("id"),
-                    "filename": paper.get("filename", "unknown"),
-                })
-            else:
-                # Fallback: bare paper_id string
-                resources.append({"paper_id": paper, "filename": "unknown"})
+            resources.append({
+                "paper_id": paper.get("id"),
+                "filename": paper.get("filename", "unknown"),
+                "upload_date": paper.get("upload_date"),
+                "user_id": paper.get("user_id"),
+            })
 
         return resources

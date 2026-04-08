@@ -74,7 +74,8 @@ class AgentManager:
     async def shutdown(self):
         """Gracefully shutdown agent"""
         logger.info("🛑 Shutting down Agent Manager...")
-        # Orchestrator handles its own cleanup
+        if self.orchestrator:
+            await self.orchestrator.cleanup()
         self._initialized = False
         logger.info("✅ Agent Manager shutdown complete")
     
@@ -226,15 +227,8 @@ class AgentManager:
             logger.info(f"   Query: {message[:100]}{'...' if len(message) > 100 else ''}")
             logger.info(f"   History: {len(conversation_history)} previous messages")
             
-            # result= await self.orchestrator.process(message, conversation_history)
-            # Run orchestrator processing (synchronous, so run in executor)
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: self.orchestrator.process(message, conversation_history)
-            )
-
-
+            # AWAIT the orchestrator.process() directly - it's already async
+            result = await self.orchestrator.process(message, conversation_history)
             
             execution_time = time.time() - start_time
             
