@@ -101,7 +101,7 @@ cp .env.example .env
 python -m orchestration.start_script
 
 # Start the API server
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8001
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Frontend Setup
