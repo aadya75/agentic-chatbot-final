@@ -22,6 +22,11 @@ async def lifespan(app: FastAPI):
     # Set startup time in app state
     app.state.start_time = time.time()
     
+    # Create data directories if they don't exist
+    os.makedirs(os.getenv('FAISS_INDEX_DIR', './data/indices'), exist_ok=True)
+    os.makedirs(os.getenv('UPLOAD_DIR', './data/uploads'), exist_ok=True)
+    logger.info(f"📁 Upload directory: {os.getenv('UPLOAD_DIR', './data/uploads')}")
+    
     # Import and initialize agent manager
     from core.agent import agent_manager
     
@@ -68,11 +73,11 @@ app.add_middleware(
 
 # Import routes - AFTER app creation but BEFORE including them
 try:
-    from api.routes import health, chat , knowledge
+    from api.routes import health, chat, knowledge
     logger.info("✅ Routes imported successfully")
 except ImportError as e:
     logger.error(f"❌ Failed to import routes: {e}")
-    logger.error("   Make sure api/routes/health.py and api/routes/chat.py exist")
+    logger.error("   Make sure api/routes/health.py, api/routes/chat.py, and api/routes/knowledge.py exist")
     raise
 
 # Include routers with /api prefix
@@ -85,6 +90,9 @@ logger.info("   - /api/health")
 logger.info("   - /api/status")
 logger.info("   - /api/thread")
 logger.info("   - /api/thread/{thread_id}/chat")
+logger.info("   - /api/knowledge/upload")
+logger.info("   - /api/knowledge/resources")
+logger.info("   - /api/knowledge/search")
 
 # Root endpoint
 @app.get("/")
@@ -101,7 +109,12 @@ async def root(request: Request):
             "health": "/api/health",
             "status": "/api/status",
             "create_thread": "POST /api/thread",
-            "chat": "POST /api/thread/{thread_id}/chat"
+            "chat": "POST /api/thread/{thread_id}/chat",
+            "knowledge": {
+                "upload": "POST /api/knowledge/upload",
+                "resources": "GET /api/knowledge/resources",
+                "search": "POST /api/knowledge/search"
+            }
         }
     }
 
@@ -129,13 +142,3 @@ if __name__ == "__main__":
         reload=True,
         log_level="info"
     )
-    
-# In startup event, add:
-@app.on_event("startup")
-async def startup_event():
-    # ... your existing startup code ...
-    
-    # Create data directories if they don't exist
-    os.makedirs(os.getenv('FAISS_INDEX_DIR', './data/indices'), exist_ok=True)
-    os.makedirs(os.getenv('UPLOAD_DIR', './data/uploads'), exist_ok=True)
-    print(f"Knowledge Base: {os.getenv('FAISS_INDEX_DIR', './data/indices')}")
