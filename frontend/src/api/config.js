@@ -1,68 +1,60 @@
-// frontend/src/api/config.js - Vite version
+// frontend/src/api/config.js
 
-// Vite uses import.meta.env
 const isDevelopment = import.meta.env.DEV;
 const isProduction = import.meta.env.PROD;
 
-// API Configuration for Vite
 const API_CONFIG = {
-  // Base URL - can be set via .env file
   BASE_URL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
-  
-  // API version
   API_VERSION: '1.0.0',
-  
-  // Request timeout in milliseconds
   TIMEOUT: 30000,
-  
-  // Maximum retry attempts for failed requests
   MAX_RETRIES: 3,
-  
-  // Retry delay in milliseconds
   RETRY_DELAY: 1000,
-  
-  // Debug mode - enabled in development
   DEBUG: isDevelopment,
 };
 
-// Log config in development
 if (API_CONFIG.DEBUG) {
-  console.log('🎯 Vite API Configuration:', {
+  console.log('🎯 API Config:', {
     baseURL: API_CONFIG.BASE_URL,
     mode: isDevelopment ? 'development' : 'production',
-    env: {
-      VITE_API_URL: import.meta.env.VITE_API_URL,
-      DEV: isDevelopment,
-      PROD: isProduction,
-    }
   });
 }
 
-// API Endpoints
 export const ENDPOINTS = {
-  // Health endpoints
-  HEALTH: '/api/health',
-  HEALTH_READY: '/api/health/ready',
-  HEALTH_LIVE: '/api/health/live',
-  
-  // Chat endpoints
-  CHAT: '/api/message',
-  CREATE_THREAD: '/api/thread',
+  // Health
+  HEALTH:        '/api/health',
+  STATUS:        '/api/status',
+
+  // Auth  (no /api prefix — matches backend)
+  SIGNUP:        '/auth/signup',
+  LOGIN:         '/auth/login',
+  LOGOUT:        '/auth/logout',
+  REFRESH:       '/auth/refresh',
+  ME:            '/auth/me',
+
+  GOOGLE_CONNECT:    '/auth/google/connect',
+  GOOGLE_CALLBACK:   '/auth/google/callback',
+  GOOGLE_DISCONNECT: '/auth/google/disconnect',
+
+  GITHUB_CONNECT:    '/auth/github/connect',
+  GITHUB_CALLBACK:   '/auth/github/callback',
+  GITHUB_DISCONNECT: '/auth/github/disconnect',
+
+  // Chat  (/api prefix — matches backend)
+  SEND_MESSAGE:        '/api/message',
+  CREATE_THREAD:       '/api/thread',
   GET_THREAD_MESSAGES: (threadId) => `/api/threads/${threadId}/messages`,
-  
-  // Tools endpoints
-  TOOLS: '/api/tools',
-  TOOL_SERVERS: '/api/tools/servers',
-  EXECUTE_TOOL: '/api/tools/execute',
-  TOOL_INFO: (toolName) => `/api/tools/${toolName}`,
-  
-  // Documentation
-  DOCS: '/docs',
-  REDOC: '/redoc',
-  OPENAPI: '/openapi.json',
+  DELETE_THREAD:       (threadId) => `/api/thread/${threadId}`,
+
+  // Knowledge  (/api/knowledge prefix — matches backend)
+  KNOWLEDGE_UPLOAD:  '/api/knowledge/upload',
+  KNOWLEDGE_STATUS:  (taskId) => `/api/knowledge/status/${taskId}`,
+  KNOWLEDGE_LIST:    '/api/knowledge/resources',
+  KNOWLEDGE_DELETE:  (paperId) => `/api/knowledge/resources/${paperId}`,
+  KNOWLEDGE_STATS:   '/api/knowledge/stats',
+  KNOWLEDGE_SEARCH:  '/api/knowledge/search',
+  KNOWLEDGE_INFO:    '/api/knowledge/system/info',
 };
 
-// For backward compatibility
 export const API_STATUS = {
   SUCCESS: 'success',
   ERROR: 'error',
@@ -70,13 +62,13 @@ export const API_STATUS = {
 };
 
 export const ERROR_MESSAGES = {
-  NETWORK_ERROR: 'Network error. Please check your connection.',
-  SERVER_ERROR: 'Server error. Please try again later.',
-  TIMEOUT_ERROR: 'Request timeout. Please try again.',
-  UNAUTHORIZED: 'Authentication required.',
-  NOT_FOUND: 'Resource not found.',
+  NETWORK_ERROR:    'Network error. Please check your connection.',
+  SERVER_ERROR:     'Server error. Please try again later.',
+  TIMEOUT_ERROR:    'Request timeout. Please try again.',
+  UNAUTHORIZED:     'Authentication required.',
+  NOT_FOUND:        'Resource not found.',
   VALIDATION_ERROR: 'Validation failed.',
-  DEFAULT: 'Something went wrong. Please try again.',
+  DEFAULT:          'Something went wrong. Please try again.',
 };
 
 export default API_CONFIG;

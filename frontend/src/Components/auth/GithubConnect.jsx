@@ -1,23 +1,119 @@
 // frontend/src/Components/auth/GitHubConnect.jsx
 
-import { useEffect } from "react";
-import { useAuth } from "../../context/AuthContext";
+import { useState, useEffect } from "react";
+import apiService from "../../api/services";
 
 export default function GitHubConnect() {
-  const {
-    isGitHubConnected,
-    githubUsername,
-    connectGitHub,
-    disconnectGitHub,
-    refreshUser,
-  } = useAuth();
+  const [isGitHubConnected, setIsGitHubConnected] = useState(false);
+  const [githubUsername, setGithubUsername] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [error, setError] = useState(null);
 
+  // Check GitHub connection status on component mount
+  useEffect(() => {
+    checkGitHubStatus();
+  }, []);
+
+  // Check for OAuth callback parameters
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("github") === "connected") {
-      refreshUser();
+    const token = params.get("token");
+    const githubConnected = params.get("github") === "connected";
+    
+    if (token) {
+      // Handle OAuth callback
+      handleOAuthCallback();
+    } else if (githubConnected) {
+      // Refresh status after connection
+      checkGitHubStatus();
+      // Clean up URL
+      window.history.replaceState({}, document.title, window.location.pathname);
     }
-  }, [refreshUser]);
+  }, []);
+
+  const handleOAuthCallback = async () => {
+    try {
+      const result = await apiService.handleOAuthCallback();
+      if (result.success) {
+        await checkGitHubStatus();
+      } else {
+        setError("Failed to connect GitHub account");
+      }
+    } catch (err) {
+      console.error("OAuth callback error:", err);
+      setError("Connection failed");
+    }
+  };
+
+  const checkGitHubStatus = async () => {
+    try {
+      setLoading(true);
+      // Get current user info which includes GitHub connection status
+      const user = await apiService.getCurrentUser();
+      
+      // Assuming your user object has github_connected and github_username fields
+      setIsGitHubConnected(user.github_connected || false);
+      setGithubUsername(user.github_username || null);
+      setError(null);
+    } catch (err) {
+      console.error("Failed to check GitHub status:", err);
+      setError("Unable to check connection status");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const connectGitHub = async () => {
+    try {
+      setConnecting(true);
+      setError(null);
+      
+      // This will redirect to backend, then to GitHub
+      await apiService.initiateGithubLogin();
+      
+      // The page will redirect, so no further code runs here
+    } catch (err) {
+      console.error("GitHub connection error:", err);
+      setError("Failed to initiate GitHub connection");
+      setConnecting(false);
+    }
+  };
+
+  const disconnectGitHub = async () => {
+    try {
+      setDisconnecting(true);
+      setError(null);
+      
+      await apiService.disconnectGithub();
+      
+      // Update local state
+      setIsGitHubConnected(false);
+      setGithubUsername(null);
+      
+      // Refresh user context if needed
+      await checkGitHubStatus();
+    } catch (err) {
+      console.error("GitHub disconnect error:", err);
+      setError("Failed to disconnect GitHub account");
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div style={styles.card}>
+        <div style={styles.header}>
+          <GitHubIcon />
+          <span style={styles.title}>GitHub</span>
+          <span style={styles.badgeOff}>Loading...</span>
+        </div>
+        <p style={styles.hint}>Checking connection status...</p>
+      </div>
+    );
+  }
 
   return (
     <div style={styles.card}>
@@ -35,13 +131,27 @@ export default function GitHubConnect() {
           : "Connect your GitHub account to let the assistant manage repositories and pull requests."}
       </p>
 
+      {error && (
+        <div style={styles.errorMessage}>
+          ⚠️ {error}
+        </div>
+      )}
+
       {isGitHubConnected ? (
-        <button onClick={disconnectGitHub} style={styles.disconnectBtn}>
-          Disconnect
+        <button 
+          onClick={disconnectGitHub} 
+          style={styles.disconnectBtn}
+          disabled={disconnecting}
+        >
+          {disconnecting ? "Disconnecting..." : "Disconnect"}
         </button>
       ) : (
-        <button onClick={connectGitHub} style={styles.connectBtn}>
-          Connect GitHub account
+        <button 
+          onClick={connectGitHub} 
+          style={styles.connectBtn}
+          disabled={connecting}
+        >
+          {connecting ? "Connecting..." : "Connect GitHub account"}
         </button>
       )}
     </div>
@@ -62,6 +172,7 @@ const styles = {
     border: "1px solid #e8e6de",
     borderRadius: 12,
     padding: "18px 20px",
+    position: "relative",
   },
   header: {
     display: "flex",
@@ -69,7 +180,12 @@ const styles = {
     gap: 10,
     marginBottom: 10,
   },
-  title: { fontSize: 15, fontWeight: 500, color: "#1a1a18", flex: 1 },
+  title: { 
+    fontSize: 15, 
+    fontWeight: 500, 
+    color: "#1a1a18", 
+    flex: 1 
+  },
   badgeOn: {
     fontSize: 12,
     background: "#EAF3DE",
@@ -84,7 +200,20 @@ const styles = {
     borderRadius: 20,
     padding: "2px 10px",
   },
-  hint: { fontSize: 13, color: "#5f5e5a", marginBottom: 14, lineHeight: 1.5 },
+  hint: { 
+    fontSize: 13, 
+    color: "#5f5e5a", 
+    marginBottom: 14, 
+    lineHeight: 1.5 
+  },
+  errorMessage: {
+    fontSize: 12,
+    color: "#A32D2D",
+    background: "#FFE5E5",
+    padding: "8px 12px",
+    borderRadius: 6,
+    marginBottom: 14,
+  },
   connectBtn: {
     padding: "8px 16px",
     fontSize: 14,
@@ -94,6 +223,7 @@ const styles = {
     border: "none",
     borderRadius: 8,
     cursor: "pointer",
+    transition: "all 0.2s ease",
   },
   disconnectBtn: {
     padding: "8px 16px",
@@ -103,5 +233,6 @@ const styles = {
     borderRadius: 8,
     cursor: "pointer",
     color: "#A32D2D",
+    transition: "all 0.2s ease",
   },
 };

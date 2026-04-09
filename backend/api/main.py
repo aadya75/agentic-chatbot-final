@@ -8,7 +8,8 @@ import time
 
 from api.routes import knowledge
 from api.routes.auth import router as auth_router
-
+from api.routes.chat import router as chat_router
+from api.routes.knowledge import router as knowledge_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,8 +86,8 @@ except ImportError as e:
 # Include routers with /api prefix
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(auth_router)
-app.include_router(chat.router, prefix="/api", tags=["chat"])
-app.include_router(knowledge.router, prefix="/api", tags=["knowledge"])
+app.include_router(chat_router, prefix="/api")
+app.include_router(knowledge_router, prefix="/api")
 
 logger.info("✅ Routes registered:")
 logger.info("   - /auth (all auth routes)")
