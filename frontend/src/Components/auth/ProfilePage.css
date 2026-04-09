@@ -1,0 +1,178 @@
+/* frontend/src/Components/auth/ProfilePage.css */
+
+.profile-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: #f9f9f7;
+}
+
+.profile-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  background: #fff;
+  border-bottom: 1px solid #e8e6de;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.profile-back-btn {
+  background: none;
+  border: 1px solid #d3d1c7;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  color: #3d3d3a;
+  transition: background 0.15s;
+}
+.profile-back-btn:hover {
+  background: #f1efe8;
+}
+
+.profile-header-title {
+  font-size: 18px;
+  font-weight: 500;
+  color: #1a1a18;
+  margin: 0;
+}
+
+.profile-content {
+  max-width: 680px;
+  width: 100%;
+  margin: 40px auto;
+  padding: 0 24px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+
+/* ── Sections ─────────────────────────────────────────────────────────── */
+
+.profile-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.profile-section-title {
+  font-size: 13px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #888780;
+  margin: 0;
+}
+
+.profile-section-desc {
+  font-size: 14px;
+  color: #5f5e5a;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* ── Account card ─────────────────────────────────────────────────────── */
+
+.profile-account-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: #fff;
+  border: 1px solid #e8e6de;
+  border-radius: 12px;
+  padding: 16px 20px;
+}
+
+.profile-avatar-large {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #534AB7;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.profile-account-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.profile-email {
+  font-size: 15px;
+  font-weight: 500;
+  color: #1a1a18;
+  margin: 0;
+}
+
+.profile-user-id {
+  font-size: 12px;
+  color: #888780;
+  margin: 0;
+  font-family: monospace;
+}
+
+/* ── Logout button ────────────────────────────────────────────────────── */
+
+.logout-btn {
+  align-self: flex-start;
+  padding: "9px 16px";
+  font-size: 14px;
+  background: none;
+  border: 1px solid #d3d1c7;
+  border-radius: 8px;
+  cursor: pointer;
+  color: #A32D2D;
+  transition: background 0.15s;
+}
+.logout-btn:hover {
+  background: #fcebeb;
+}
+
+/* ── Integrations grid ────────────────────────────────────────────────── */
+
+.integrations-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Profile button in header (App.jsx) ──────────────────────────────── */
+
+.profile-button {
+  background: none;
+  border: 1px solid #d3d1c7;
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.15s;
+}
+.profile-button:hover {
+  border-color: #888780;
+}
+
+.profile-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #534AB7;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

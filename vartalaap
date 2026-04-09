@@ -116,3 +116,7 @@ agentic-chatbot/
 │
 ├── .gitignore                          # Git ignore file
 ├── README.md                           # Project overview
+
+
+auth:
+https://claude.ai/share/cee35870-f4f5-4015-84eb-627f2b2a518c

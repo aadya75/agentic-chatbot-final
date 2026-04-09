@@ -6,8 +6,37 @@ from api.models.request import ToolExecutionRequest
 from api.models.response import ToolsListResponse, ResponseStatus, ServerStatusResponse
 from core.agent import agent_manager
 from core.config import settings
+from auth.dependencies import get_current_user, CurrentUser
+from auth.google_oauth import get_google_connection_status
+from auth.github_oauth import get_github_connection_status
 
 router = APIRouter()
+
+@router.get("/tools/status")
+async def get_tools_status(user: CurrentUser):
+    """
+    Returns which external tools are connected for the current user.
+    Useful for the frontend to show/hide tool availability in the UI.
+    """
+    google, github = await __import__("asyncio").gather(
+        get_google_connection_status(user["id"]),
+        get_github_connection_status(user["id"]),
+    )
+    return {
+        "tools": {
+            "google_workspace": {
+                "connected": google["connected"],
+                "email": google.get("email"),
+                "capabilities": ["gmail", "calendar"] if google["connected"] else [],
+            },
+            "github": {
+                "connected": github["connected"],
+                "username": github.get("username"),
+                "capabilities": ["repos", "pull_requests", "files"] if github["connected"] else [],
+            },
+        }
+    }
+    
 
 
 @router.get("/tools", response_model=ToolsListResponse)

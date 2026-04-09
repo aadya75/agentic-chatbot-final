@@ -7,6 +7,8 @@ import logging
 import time
 
 from api.routes import knowledge
+from api.routes.auth import router as auth_router
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,10 +24,10 @@ async def lifespan(app: FastAPI):
     # Set startup time in app state
     app.state.start_time = time.time()
     
-    # Create data directories if they don't exist
-    os.makedirs(os.getenv('FAISS_INDEX_DIR', './data/indices'), exist_ok=True)
-    os.makedirs(os.getenv('UPLOAD_DIR', './data/uploads'), exist_ok=True)
-    logger.info(f"📁 Upload directory: {os.getenv('UPLOAD_DIR', './data/uploads')}")
+    # # Create data directories if they don't exist
+    # os.makedirs(os.getenv('FAISS_INDEX_DIR', './data/indices'), exist_ok=True)
+    # os.makedirs(os.getenv('UPLOAD_DIR', './data/uploads'), exist_ok=True)
+    # logger.info(f"📁 Upload directory: {os.getenv('UPLOAD_DIR', './data/uploads')}")
     
     # Import and initialize agent manager
     from core.agent import agent_manager
@@ -82,10 +84,12 @@ except ImportError as e:
 
 # Include routers with /api prefix
 app.include_router(health.router, prefix="/api", tags=["health"])
+app.include_router(auth_router)
 app.include_router(chat.router, prefix="/api", tags=["chat"])
 app.include_router(knowledge.router, prefix="/api", tags=["knowledge"])
 
 logger.info("✅ Routes registered:")
+logger.info("   - /auth (all auth routes)")
 logger.info("   - /api/health")
 logger.info("   - /api/status")
 logger.info("   - /api/thread")
