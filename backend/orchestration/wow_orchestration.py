@@ -15,7 +15,7 @@ from langchain_groq import ChatGroq
 from langchain_community.tools import WikipediaQueryRun
 from langchain_community.utilities import WikipediaAPIWrapper
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
+from langgraph.types import Send, Command
 from pydantic import BaseModel, Field, field_validator
 try:
     from langgraph.prebuilt import create_react_agent
@@ -731,7 +731,7 @@ async def github_worker_node(payload: dict) -> dict:
                 output="No GitHub tools available."
             )]}
 
-        agent = create_agent(llm, filtered)
+        agent = create_agent(worker_llm, filtered)
 
         prompt = (
             f"GitHub Task: {task_data.get('description', '')}\n"
@@ -784,17 +784,29 @@ async def github_worker_node(payload: dict) -> dict:
 from auth.mcp_token_bridge import get_google_workspace_client_for_user
 
 async def google_workspace_worker_node(payload: dict) -> dict:
-    task_data = payload["task"]
-    context = payload.get("context", "")
-    task_id = task_data["id"]
-    user_query = payload.get("user_query", "")
+    # Called either via Send(payload) from confirmation_node — payload has "task" key
+    # or via fanout Send directly — same structure
+    # Guard: if "task" key missing, payload IS the task dict itself
+    if "task" in payload:
+        task_data  = payload["task"]
+        context    = payload.get("context", "")
+        user_query = payload.get("user_query", "")
+        user_id    = payload.get("user_id", "")
+    else:
+        # Fallback: treat entire payload as task_data
+        task_data  = payload
+        context    = ""
+        user_query = ""
+        user_id    = ""
+
+    task_id = task_data.get("id", 0)
     google_service = (
-        task_data.get("google_service") or task_data.get("worker_type", "")
+        (task_data.get("google_service") or task_data.get("worker_type") or "")
     ).lower()
     print(f"  GOOGLE_WORKER: Task {task_id} ({google_service})")
 
     try:
-        client = await get_google_workspace_client_for_user(user_id=payload["user_id"])
+        client = await get_google_workspace_client_for_user(user_id=user_id)
         if client is None:
             return {"results": [TaskResult(
                 task_id=task_id, worker_type="google",
@@ -844,7 +856,6 @@ Tool contracts:
 - get_gmail_attachment_content(message_id, attachment_id) -> retrieves an attachment.
 
 Present email summaries as: Subject | From | Date | Key points (2 lines max each).
-gmail handdle is : nainaamodii@gmail.com
 """
 
         elif google_service == "calendar":
@@ -857,8 +868,7 @@ Tool contracts:
   Extract these directly from the user request.
 - Update tools -> require event id. Search/list first to get the id, then update.
 
-Present schedules in chronological order: Date | Time | Event title | Key details.
-gmail handdle is : nainaamodii@gmail.com
+Present schedules in chronological order: Date | Time | Event title 
 """
 
         else:
@@ -866,7 +876,6 @@ gmail handdle is : nainaamodii@gmail.com
                 "You are a Google Workspace assistant. "
                 "When a tool returns IDs or references, pass them as input to "
                 "subsequent tools that need them. Be concise."
-                "gmail handdle is : nainaamodii@gmail.com"
             )
 
         task_desc = task_data.get("description", "")[:500]
@@ -1000,6 +1009,7 @@ async def results_aggregator_node(state: OrchestratorState) -> dict:
 # ============================================================================
 
 def build_smart_orchestrator():
+    """Original graph — no HITL. Used as fallback / CLI."""
     g = StateGraph(OrchestratorState)
 
     g.add_node("planning",               planning_agent_node)
@@ -1045,12 +1055,138 @@ def build_smart_orchestrator():
 
 
 # ============================================================================
+# FANOUT WITH HITL — Google tasks routed through confirmation_node first
+# ============================================================================
+
+def fanout_to_workers_hitl(state: OrchestratorState):
+    """
+    Like fanout_to_workers but Google tasks go through confirmation_node first.
+    GitHub and conversational tasks bypass HITL entirely.
+    """
+    context = state.get("combined_context", "")
+    user_id = state.get("user_id", "")
+
+    sends = []
+    for task in state["tasks"]:
+        payload = {
+            "task": task.model_dump(),
+            "user_query": state["user_query"],
+            "user_id": user_id,
+        }
+        if context:
+            payload["context"] = context
+
+        if task.worker_type == "github":
+            sends.append(Send("github_worker", payload))
+        elif task.worker_type in ("gmail", "calendar") or (
+            task.worker_type.startswith("google_") or task.google_service
+        ):
+            # Google tasks → confirmation gate
+            sends.append(Send("confirmation_node", payload))
+        else:
+            sends.append(Send("conversational_worker", payload))
+    return sends
+
+
+def route_after_confirmation(state: OrchestratorState) -> str:
+    """After confirmation_node: remaining approved tasks → worker; empty → aggregator."""
+    return "google_workspace_worker" if state.get("tasks") else "aggregator"
+
+
+def build_smart_orchestrator_with_hitl(checkpointer=None):
+    """
+    Full orchestrator graph with Human-in-the-Loop confirmation for
+    Google write actions (Gmail send, Calendar create/update/delete).
+
+    Args:
+        checkpointer: LangGraph checkpointer (SqliteSaver / AsyncPostgresSaver).
+                      Required for HITL to persist state across HTTP requests.
+    """
+    from hitl.confirmation import confirmation_node
+
+    g = StateGraph(OrchestratorState)
+
+    # ── Existing nodes (unchanged) ──
+    g.add_node("planning",                planning_agent_node)
+    g.add_node("web_search",              web_search_node)
+    g.add_node("rag_search",              rag_search_node)
+    g.add_node("club_search",             club_search_node)
+    g.add_node("gather_mixed_context",    gather_mixed_context_node)
+    g.add_node("execute_tasks",           lambda s: s)
+    g.add_node("github_worker",           github_worker_node)
+    g.add_node("google_workspace_worker", google_workspace_worker_node)
+    g.add_node("conversational_worker",   conversational_worker_node)
+    g.add_node("aggregator",              results_aggregator_node)
+
+    # ── New HITL confirmation node ──
+    g.add_node("confirmation_node",       confirmation_node)
+
+    # ── Same edges as before up to execute_tasks ──
+    g.add_edge(START, "planning")
+    g.add_conditional_edges(
+        "planning",
+        route_after_planning,
+        {
+            "web_search":           "web_search",
+            "rag_search":           "rag_search",
+            "club_search":          "club_search",
+            "gather_mixed_context": "gather_mixed_context",
+            "execute_tasks":        "execute_tasks",
+        },
+    )
+    for ctx in ("web_search", "rag_search", "club_search", "gather_mixed_context"):
+        g.add_edge(ctx, "execute_tasks")
+
+    # ── Updated fanout: Google → confirmation first ──
+    g.add_conditional_edges(
+        "execute_tasks",
+        fanout_to_workers_hitl,
+        {
+            "github_worker":        "github_worker",
+            "confirmation_node":    "confirmation_node",
+            "conversational_worker":"conversational_worker",
+        },
+    )
+
+    # ── After confirmation: approved → worker, all rejected → aggregator ──
+    g.add_conditional_edges(
+        "confirmation_node",
+        route_after_confirmation,
+        {
+            "google_workspace_worker": "google_workspace_worker",
+            "aggregator":              "aggregator",
+        },
+    )
+
+    for w in ("github_worker", "google_workspace_worker", "conversational_worker"):
+        g.add_edge(w, "aggregator")
+    g.add_edge("aggregator", END)
+
+    return g.compile(checkpointer=checkpointer)
+
+
+# ============================================================================
 # ORCHESTRATOR
 # ============================================================================
 
 class SmartOrchestrator:
+    """
+    Smart Orchestrator with Human-in-the-Loop support for Google write actions.
+
+    Normal flow  : process() → returns final response.
+    HITL flow    : process() → returns {interrupted: True, confirmation_required: {...}}
+                   resume()  → returns final response after user approves/rejects.
+    """
+
     def __init__(self):
-        self.graph = build_smart_orchestrator()
+        from hitl.checkpointer import get_checkpointer
+        self._checkpointer = get_checkpointer()
+        self.graph = build_smart_orchestrator_with_hitl(checkpointer=self._checkpointer)
+
+        # Track which thread IDs are currently paused waiting for confirmation.
+        # Maps thread_id → confirmation message string.
+        self._pending_confirmations: dict[str, str] = {}
+
         rag_ok = get_rag_retrieval_service() is not None
         print(f"\n{'='*60}")
         print(f"SMART ORCHESTRATOR READY  (model: {_model})")
@@ -1059,47 +1195,169 @@ class SmartOrchestrator:
         print(f"  Club RAG     : lazy (initialises on first club query)")
         print(f"  Workers      : conversational | github | gmail | calendar")
         print(f"  Worker LLM   : {os.getenv('WORKER_MODEL', 'llama-3.1-8b-instant')}")
+        print(f"  HITL         : ENABLED (gmail send / calendar create/update/delete)")
         print(f"{'='*60}")
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _make_config(self, thread_id: str) -> dict:
+        return {"configurable": {"thread_id": thread_id}}
+
+    def _extract_interrupt(self, state_or_exc, thread_id: str) -> dict | None:
+        """
+        LangGraph surfaces interrupts in two ways depending on version:
+          1. As __interrupt__ key in the returned state dict.
+          2. As a GraphInterrupt / NodeInterrupt exception.
+        Handle both here.
+        """
+        # Pattern 1: interrupt in state
+        if isinstance(state_or_exc, dict):
+            interrupt_data = state_or_exc.get("__interrupt__")
+            if interrupt_data:
+                msg = interrupt_data[0].value if hasattr(interrupt_data[0], "value") else str(interrupt_data[0])
+                self._pending_confirmations[thread_id] = msg
+                return {
+                    "success": True,
+                    "interrupted": True,
+                    "confirmation_required": {"message": msg, "thread_id": thread_id},
+                }
+            return None
+
+        # Pattern 2: exception
+        exc = state_or_exc
+        exc_type = type(exc).__name__
+        if "interrupt" not in exc_type.lower() and "Interrupt" not in exc_type:
+            return None
+
+        try:
+            val = exc.value if hasattr(exc, "value") else str(exc)
+            if isinstance(val, (list, tuple)) and val:
+                val = val[0].value if hasattr(val[0], "value") else str(val[0])
+            msg = str(val)
+        except Exception:
+            msg = str(exc)
+
+        self._pending_confirmations[thread_id] = msg
+        return {
+            "success": True,
+            "interrupted": True,
+            "confirmation_required": {"message": msg, "thread_id": thread_id},
+        }
+
+    def _build_success_response(self, final: dict) -> dict:
+        results = final.get("results", [])
+        return {
+            "success": True,
+            "interrupted": False,
+            "response": final.get("final_response", ""),
+            "metadata": {
+                "total_tasks":      len(results),
+                "successful_tasks": sum(1 for r in results if r.success),
+                "web_search_used":  bool(final.get("web_context")),
+                "rag_search_used":  bool(final.get("rag_context")),
+                "club_search_used": bool(final.get("club_context")),
+                "workers_used":     list({r.worker_type for r in results}),
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     async def process(self, user_query: str,
-                      conversation_history: List[str] = None, user_id: str = "") -> dict:
+                      conversation_history: List[str] = None,
+                      user_id: str = "") -> dict:
+        """
+        Process a user query.
+
+        Returns either:
+          - Normal:      {success, interrupted=False, response, metadata}
+          - Interrupted: {success, interrupted=True,  confirmation_required: {message, thread_id}}
+        """
         if not user_query or not user_query.strip():
-            return {"success": False, "response": "Empty query.", "metadata": {}}
+            return {"success": False, "interrupted": False, "response": "Empty query.", "metadata": {}}
+
+        thread_id = user_id or "default"
+        config    = self._make_config(thread_id)
 
         state: OrchestratorState = {
-            "user_id": user_id,                          # ← threaded through state for workers
-            "user_query": user_query.strip(),
-            "conversation_history": conversation_history or [],
-            "plan": None,
-            "web_context": [],
-            "rag_context": [],
-            "club_context": [],
-            "combined_context": "",
-            "tasks": [],
-            "results": [],
-            "final_response": "",
+            "user_id":               user_id,
+            "user_query":            user_query.strip(),
+            "conversation_history":  conversation_history or [],
+            "plan":                  None,
+            "web_context":           [],
+            "rag_context":           [],
+            "club_context":          [],
+            "combined_context":      "",
+            "tasks":                 [],
+            "results":               [],
+            "final_response":        "",
         }
-        
+
         try:
-            final = await self.graph.ainvoke(state)
-            results = final.get("results", [])
-            return {
-                "success": True,
-                "response": final["final_response"],
-                "metadata": {
-                    "total_tasks":      len(results),
-                    "successful_tasks": sum(1 for r in results if r.success),
-                    "web_search_used":  bool(final.get("web_context")),
-                    "rag_search_used":  bool(final.get("rag_context")),
-                    "club_search_used": bool(final.get("club_context")),
-                    "workers_used":     list({r.worker_type for r in results}),
-                },
-            }
+            final = await self.graph.ainvoke(state, config=config)
+
+            # Check if graph paused mid-run (interrupt embedded in state)
+            interrupt_resp = self._extract_interrupt(final, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
+
+            return self._build_success_response(final)
+
         except Exception as exc:
+            # Check if this is a LangGraph interrupt exception
+            interrupt_resp = self._extract_interrupt(exc, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
+
             logger.error(f"Orchestrator error: {exc}", exc_info=True)
-            return {"success": False,
-                    "response": f"Orchestrator error: {exc}",
-                    "metadata": {}}
+            return {"success": False, "interrupted": False,
+                    "response": f"Orchestrator error: {exc}", "metadata": {}}
+
+    async def resume(self, thread_id: str, user_response: str) -> dict:
+        """
+        Resume a paused graph after the user approves or rejects.
+
+        Args:
+            thread_id:     The user_id used in the original process() call.
+            user_response: "approve" | "reject" (or yes/no/ok/cancel).
+
+        Returns the final response dict, same shape as process().
+        """
+        config = self._make_config(thread_id)
+        self._pending_confirmations.pop(thread_id, None)
+
+        try:
+            final = await self.graph.ainvoke(
+                Command(resume=user_response),
+                config=config,
+            )
+
+            # Could be another interrupt (multiple write tasks in one query)
+            interrupt_resp = self._extract_interrupt(final, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
+
+            return self._build_success_response(final)
+
+        except Exception as exc:
+            interrupt_resp = self._extract_interrupt(exc, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
+
+            logger.error(f"Resume error: {exc}", exc_info=True)
+            return {"success": False, "interrupted": False,
+                    "response": f"Resume error: {exc}", "metadata": {}}
+
+    def is_pending_confirmation(self, thread_id: str) -> bool:
+        """Returns True if this thread is currently paused waiting for user confirmation."""
+        return thread_id in self._pending_confirmations
+
+    def get_pending_message(self, thread_id: str) -> str | None:
+        """Returns the pending confirmation message for a thread, or None."""
+        return self._pending_confirmations.get(thread_id)
 
     async def cleanup(self):
         await mcp_pool.cleanup()

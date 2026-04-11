@@ -161,6 +161,9 @@ class AgentManager:
         Process a message through the orchestrator.
         user_id is threaded into the orchestrator so workers can fetch
         per-user Google / GitHub tokens from Supabase.
+
+        Returns either a normal response dict, or an interrupted dict if
+        the orchestrator needs human confirmation for a Google write action.
         """
         if not self.is_initialized:
             raise RuntimeError("Agent not initialized")
@@ -174,39 +177,104 @@ class AgentManager:
             }
 
         start = datetime.utcnow()
-        
-        
+
         # Build conversation history for the orchestrator
         history = [
             f"{m['role']}: {m['content']}"
             for m in self.threads[thread_id].get("messages", [])[-10:]
         ]
 
-        # ── Pass user_id into the orchestrator ────────────────────────────
-        # Your orchestrator's process() method now accepts user_id.
-        # If you're using SmartOrchestrator from smart_orchestrator.py:
         result = await self.orchestrator.process(
             user_query=message,
             conversation_history=history,
-            user_id=user_id,            # ← per-user token lookup in workers
+            user_id=user_id,
         )
 
         elapsed = (datetime.utcnow() - start).total_seconds()
         message_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
 
+        # ── HITL: graph paused for human confirmation ──────────────────────
+        if result.get("interrupted"):
+            # Store user message in thread but NOT an assistant response yet
+            self.threads[thread_id]["messages"].append(
+                {"id": str(uuid.uuid4()), "role": "user", "content": message, "timestamp": now}
+            )
+            # Return the interruption payload — API layer will forward to frontend
+            return {
+                "interrupted": True,
+                "confirmation_required": result["confirmation_required"],
+                "thread_id": thread_id,
+                "message_id": message_id,
+                "execution_time": elapsed,
+            }
+
+        # ── Normal response ────────────────────────────────────────────────
         response_text = result.get("response", "Sorry, I could not process that.")
 
-        # # Store in thread history
-        # self._append_to_history(thread_id, message, response_text)
-
-        # Persist to thread
-        now = datetime.utcnow().isoformat()
         self.threads[thread_id]["messages"].extend([
             {"id": str(uuid.uuid4()), "role": "user",      "content": message,       "timestamp": now},
             {"id": message_id,        "role": "assistant", "content": response_text, "timestamp": now},
         ])
 
         return {
+            "interrupted": False,
+            "message": response_text,
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "execution_time": elapsed,
+        }
+
+    async def resume(
+        self,
+        thread_id: str,
+        user_response: str,
+        user_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Resume a paused graph after the user approves or rejects a HITL confirmation.
+
+        Args:
+            thread_id:     Thread ID from the interrupted response.
+            user_response: "approve" or "reject".
+            user_id:       Supabase user UUID (for token lookups).
+
+        Returns the same shape as chat() — either a final response or another interruption.
+        """
+        if not self.is_initialized:
+            raise RuntimeError("Agent not initialized")
+
+        start = datetime.utcnow()
+        message_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+
+        result = await self.orchestrator.resume(
+            thread_id=thread_id,
+            user_response=user_response,
+        )
+
+        elapsed = (datetime.utcnow() - start).total_seconds()
+
+        # Another HITL pause (multiple write tasks)
+        if result.get("interrupted"):
+            return {
+                "interrupted": True,
+                "confirmation_required": result["confirmation_required"],
+                "thread_id": thread_id,
+                "message_id": message_id,
+                "execution_time": elapsed,
+            }
+
+        response_text = result.get("response", "Action completed.")
+
+        # Add assistant response to thread history
+        if thread_id in self.threads:
+            self.threads[thread_id]["messages"].append(
+                {"id": message_id, "role": "assistant", "content": response_text, "timestamp": now}
+            )
+
+        return {
+            "interrupted": False,
             "message": response_text,
             "thread_id": thread_id,
             "message_id": message_id,

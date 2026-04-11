@@ -419,6 +419,31 @@ export const apiService = {
   },
 
   /**
+   * Confirm (approve or reject) a pending HITL action.
+   * Called after sendMessage returns interrupted=true.
+   *
+   * @param {string} threadId   - From confirmation_required.thread_id
+   * @param {string} userResp   - "approve" or "reject"
+   * @returns {object}          - Same shape as sendMessage()
+   */
+  async confirmAction(threadId, userResp) {
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    httpClient.setAuthToken(token);
+
+    if (API_CONFIG.DEBUG) {
+      console.log('🔐 HITL confirm:', { threadId, userResp });
+    }
+
+    const response = await httpClient.post('/api/message/confirm', {
+      thread_id: threadId,
+      response: userResp,
+    });
+
+    return { success: true, data: response };
+  },
+
+  /**
    * Stream a message response (Server-Sent Events)
    */
   async streamMessage(threadId, message, onChunk, onComplete, onError) {
