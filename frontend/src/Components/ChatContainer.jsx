@@ -1,12 +1,13 @@
 // frontend/src/Components/ChatContainer.jsx
 import React, { useState, useRef, useEffect } from 'react';
 import { useChat } from '../hooks/useChat';
+import ConfirmationModal from './ConfirmationModal';
 import './ChatContainer.css';
 
 function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef(null);
-  
+
   const {
     messages,
     isLoading,
@@ -14,6 +15,10 @@ function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
     error,
     sendMessage,
     sendMessageStream,
+    // HITL
+    pendingConfirmation,
+    isConfirming,
+    confirmAction,
   } = useChat(threadId, onMessageSent);
 
   // Auto-scroll to bottom when new messages arrive
@@ -23,16 +28,12 @@ function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
-    if (!inputValue.trim() || isLoading || isStreaming) {
-      return;
-    }
 
+    if (!inputValue.trim() || isLoading || isStreaming) return;
     if (!isBackendConnected) {
       alert('Backend is not connected. Please wait...');
       return;
     }
-
     if (!threadId) {
       alert('No thread selected. Please select or create a chat.');
       return;
@@ -42,9 +43,7 @@ function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
     setInputValue('');
 
     try {
-      // Use streaming for better UX
       await sendMessageStream(message);
-      // Or use regular send: await sendMessage(message);
     } catch (err) {
       console.error('Failed to send message:', err);
     }
@@ -52,7 +51,19 @@ function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
 
   return (
     <div className="chat-container">
-      {/* Messages */}
+
+      {/* ── HITL Confirmation Modal ─────────────────────────────────── */}
+      {pendingConfirmation && (
+        <ConfirmationModal
+          message={pendingConfirmation.message}
+          threadId={pendingConfirmation.thread_id}
+          isLoading={isConfirming}
+          onApprove={(jsonString) => confirmAction(jsonString)}
+          onReject={() => confirmAction('reject')}
+        />
+      )}
+
+      {/* ── Messages ────────────────────────────────────────────────── */}
       <div className="messages-container">
         {messages.length === 0 && (
           <div className="empty-state">
@@ -63,10 +74,7 @@ function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
         )}
 
         {messages.map((message) => (
-          <div
-            key={message.id}
-            className={`message ${message.role}`}
-          >
+          <div key={message.id} className={`message ${message.role}`}>
             <div className="message-header">
               <span className="message-role">
                 {message.role === 'user' ? '👤 You' : '🤖 Assistant'}
@@ -75,17 +83,25 @@ function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
                 {new Date(message.timestamp).toLocaleTimeString()}
               </span>
             </div>
-            <div className="message-content">
-              {message.content}
-            </div>
+            <div className="message-content">{message.content}</div>
           </div>
         ))}
 
-        {isStreaming && (
+        {/* Waiting-for-confirmation indicator (replaces generic typing dots) */}
+        {pendingConfirmation && !isConfirming && (
+          <div className="message assistant">
+            <div className="message-header">
+              <span className="message-role">🤖 Assistant</span>
+            </div>
+            <div className="message-content" style={{ color: '#f0a500', fontStyle: 'italic' }}>
+              ⏳ Waiting for your approval before proceeding…
+            </div>
+          </div>
+        )}
+
+        {(isStreaming || isLoading) && !pendingConfirmation && (
           <div className="typing-indicator">
-            <span></span>
-            <span></span>
-            <span></span>
+            <span></span><span></span><span></span>
           </div>
         )}
 
@@ -99,18 +115,26 @@ function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input */}
+      {/* ── Input ───────────────────────────────────────────────────── */}
       <form className="chat-input-form" onSubmit={handleSubmit}>
         <div className="input-wrapper">
           <textarea
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             placeholder={
-              isBackendConnected
-                ? 'Type your message...'
-                : 'Waiting for backend connection...'
+              pendingConfirmation
+                ? 'Waiting for your approval above…'
+                : isBackendConnected
+                ? 'Type your message…'
+                : 'Waiting for backend connection…'
             }
-            disabled={!isBackendConnected || isLoading || isStreaming || !threadId}
+            disabled={
+              !isBackendConnected ||
+              isLoading ||
+              isStreaming ||
+              !threadId ||
+              !!pendingConfirmation   // lock input while modal is open
+            }
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -122,7 +146,14 @@ function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
           />
           <button
             type="submit"
-            disabled={!inputValue.trim() || !isBackendConnected || isLoading || isStreaming || !threadId}
+            disabled={
+              !inputValue.trim() ||
+              !isBackendConnected ||
+              isLoading ||
+              isStreaming ||
+              !threadId ||
+              !!pendingConfirmation
+            }
             className="send-button"
           >
             {isLoading || isStreaming ? '⏳' : '📤'}
