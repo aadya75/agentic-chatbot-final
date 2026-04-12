@@ -56,3 +56,8 @@ backend/data/club_knowledge/last_updated.txt
 
 *.json
 
+vartalaap
+*.lock
+*.txt
+*.toml
+.python-version
