@@ -1,53 +1,85 @@
 // frontend/src/hooks/useChat.js
-import { useState, useCallback, useEffect, useRef } from 'react';
+//
+// Extended with Human-in-the-Loop (HITL) support.
+// When the backend returns interrupted=true, the hook exposes
+// `pendingConfirmation` state and a `confirmAction()` handler
+// that the UI layer can use to render the ConfirmationModal.
+
+import { useState, useCallback, useEffect } from 'react';
 import { apiService } from '../api/services';
 
 /**
- * Hook for managing chat conversations
- * Works with external thread management
+ * Hook for managing chat conversations.
+ *
+ * New exports for HITL:
+ *   pendingConfirmation  {object|null}  — { message, thread_id } when interrupted
+ *   confirmAction        {fn}           — confirmAction("approve"|"reject")
+ *   isConfirming         {boolean}      — true while confirm request is in-flight
  */
 export function useChat(initialThreadId = null, onMessageSent = null) {
-  const [threadId, setThreadId] = useState(initialThreadId);
-  const [messages, setMessages] = useState([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [error, setError] = useState(null);
+  const [threadId, setThreadId]       = useState(initialThreadId);
+  const [messages, setMessages]       = useState([]);
+  const [isLoading, setIsLoading]     = useState(false);
+  const [isStreaming, setIsStreaming]  = useState(false);
+  const [error, setError]             = useState(null);
+
+  // ── HITL state ────────────────────────────────────────────────────
+  const [pendingConfirmation, setPendingConfirmation] = useState(null);
+  const [isConfirming, setIsConfirming] = useState(false);
+  // ─────────────────────────────────────────────────────────────────
 
   // Update threadId when prop changes
   useEffect(() => {
     if (initialThreadId !== threadId) {
       setThreadId(initialThreadId);
-      setMessages([]); // Clear messages when switching threads
-      
-      // Load messages for the new thread
+      setMessages([]);
+      setPendingConfirmation(null);
       if (initialThreadId) {
         loadMessages(initialThreadId);
       }
     }
   }, [initialThreadId]);
 
-  /**
-   * Load existing messages from thread
-   */
   const loadMessages = useCallback(async (tid) => {
     const id = tid || threadId;
     if (!id) return;
-
     try {
       const loadedMessages = await apiService.getMessages(id);
       setMessages(loadedMessages);
     } catch (err) {
       console.error('Failed to load messages:', err);
-      // Don't set error for 404 on empty threads
       if (!err.message.includes('404') && !err.message.includes('not found')) {
         setError(err.message);
       }
     }
   }, [threadId]);
 
-  /**
-   * Send a message (non-streaming)
-   */
+  // ── Helper: handle any response (normal or interrupted) ───────────
+  const _handleResponse = useCallback((result, userMessage) => {
+    const data = result.data || result;
+
+    if (data.interrupted && data.confirmation_required) {
+      // Graph paused — show confirmation modal
+      setPendingConfirmation(data.confirmation_required);
+      return;
+    }
+
+    // Normal response — add assistant message
+    setPendingConfirmation(null);
+    const assistantMessage = {
+      id: data.message_id || `assistant-${Date.now()}`,
+      role: 'assistant',
+      content: data.message,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, assistantMessage]);
+
+    if (onMessageSent && threadId) {
+      onMessageSent(threadId, userMessage);
+    }
+  }, [threadId, onMessageSent]);
+
+  // ── Send message ──────────────────────────────────────────────────
   const sendMessage = useCallback(async (message, options = {}) => {
     if (!message.trim()) return;
     if (!threadId) {
@@ -58,68 +90,38 @@ export function useChat(initialThreadId = null, onMessageSent = null) {
     setIsLoading(true);
     setError(null);
 
-    // Add user message optimistically
+    // Optimistic user bubble
+    const tempId = `temp-${Date.now()}`;
     const userMessage = {
-      id: `temp-${Date.now()}`,
+      id: tempId,
       role: 'user',
       content: message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     };
     setMessages(prev => [...prev, userMessage]);
 
     try {
-      console.log('Sending message to thread:', threadId);
       const result = await apiService.sendMessage(threadId, message, options);
-      console.log('Got response:', result);
-      
       if (result.success) {
-        // Replace optimistic message and add assistant response
-        setMessages(prev => {
-          // Remove temporary message
-          const filtered = prev.filter(m => m.id !== userMessage.id);
-          
-          // Add real user message
-          const realUserMessage = {
-            id: `user-${Date.now()}`,
-            role: 'user',
-            content: message,
-            timestamp: result.data.timestamp
-          };
-          
-          // Add assistant message
-          const assistantMessage = {
-            id: result.data.message_id || `assistant-${Date.now()}`,
-            role: 'assistant',
-            content: result.data.message,
-            timestamp: result.data.timestamp
-          };
-          
-          console.log('Adding messages:', { realUserMessage, assistantMessage });
-          
-          return [...filtered, realUserMessage, assistantMessage];
-        });
-
-        // Notify parent about message sent
-        if (onMessageSent) {
-          onMessageSent(threadId, message);
-        }
+        // Replace temp with real user message
+        setMessages(prev => prev.map(m =>
+          m.id === tempId
+            ? { ...m, id: `user-${Date.now()}` }
+            : m
+        ));
+        _handleResponse(result, message);
       }
     } catch (err) {
       console.error('Failed to send message:', err);
       setError(err.message);
-      
-      // Remove optimistic message on error
-      setMessages(prev => prev.filter(m => m.id !== userMessage.id));
-      
+      setMessages(prev => prev.filter(m => m.id !== tempId));
       throw err;
     } finally {
       setIsLoading(false);
     }
-  }, [threadId, onMessageSent]);
+  }, [threadId, onMessageSent, _handleResponse]);
 
-  /**
-   * Send a message with streaming response
-   */
+  // ── Stream message (delegates to sendMessage) ─────────────────────
   const sendMessageStream = useCallback(async (message) => {
     if (!message.trim()) return;
     if (!threadId) {
@@ -130,66 +132,83 @@ export function useChat(initialThreadId = null, onMessageSent = null) {
     setIsStreaming(true);
     setError(null);
 
-    // Add user message
+    const tempId = `temp-${Date.now()}`;
     const userMessage = {
-      id: `user-${Date.now()}`,
+      id: tempId,
       role: 'user',
       content: message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     };
     setMessages(prev => [...prev, userMessage]);
 
-    // Prepare assistant message placeholder
-    const assistantMessageId = `assistant-${Date.now()}`;
-
     try {
-      // For now, just use regular send since streaming may not be implemented
       const result = await apiService.sendMessage(threadId, message);
-      
       if (result.success) {
-        const assistantMessage = {
-          id: result.data.message_id || assistantMessageId,
-          role: 'assistant',
-          content: result.data.message,
-          timestamp: new Date().toISOString()
-        };
-        
-        setMessages(prev => [...prev, assistantMessage]);
-
-        // Notify parent
-        if (onMessageSent) {
-          onMessageSent(threadId, message);
-        }
+        setMessages(prev => prev.map(m =>
+          m.id === tempId ? { ...m, id: `user-${Date.now()}` } : m
+        ));
+        _handleResponse(result, message);
       }
-      
       setIsStreaming(false);
     } catch (err) {
       console.error('Failed to stream message:', err);
       setError(err.message);
       setIsStreaming(false);
+      setMessages(prev => prev.filter(m => m.id !== tempId));
       throw err;
     }
-  }, [threadId, onMessageSent]);
+  }, [threadId, onMessageSent, _handleResponse]);
 
-  /**
-   * Clear the conversation
-   */
-  const clearConversation = useCallback(async () => {
+  // ── HITL: user approves or rejects ───────────────────────────────
+  const confirmAction = useCallback(async (userResponse) => {
+    if (!pendingConfirmation) return;
+    const confThreadId = pendingConfirmation.thread_id;
+
+    setIsConfirming(true);
+    setError(null);
+
+    try {
+      const result = await apiService.confirmAction(confThreadId, userResponse);
+      if (result.success) {
+        _handleResponse(result, userResponse);
+      }
+    } catch (err) {
+      console.error('Failed to confirm action:', err);
+      setError(err.message);
+      setPendingConfirmation(null);
+    } finally {
+      setIsConfirming(false);
+    }
+  }, [pendingConfirmation, _handleResponse]);
+
+  // ── Dismiss a pending confirmation without resuming ───────────────
+  const dismissConfirmation = useCallback(() => {
+    setPendingConfirmation(null);
+  }, []);
+
+  const clearConversation = useCallback(() => {
     setMessages([]);
+    setPendingConfirmation(null);
   }, []);
 
   return {
-    // State
+    // Core state
     threadId,
     messages,
     isLoading,
     isStreaming,
     error,
-    
+
     // Actions
     sendMessage,
     sendMessageStream,
     clearConversation,
     loadMessages,
+
+    // HITL
+    pendingConfirmation,
+    isConfirming,
+    confirmAction,
+    dismissConfirmation,
   };
 }

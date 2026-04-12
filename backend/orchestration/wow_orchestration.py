@@ -1,30 +1,3 @@
-"""
-Smart Orchestrator — Production Async Implementation
-
-Fixes in this version:
-  1. ExecutionPlan.context_type is Optional[str] + @field_validator — prevents
-     Groq 400 when LLM outputs the string "null" instead of JSON null.
-  2. planning_agent_node post-processing: infers context_type from whichever
-     query list is populated (club_queries -> "club", rag_queries -> "rag",
-     search_queries -> "web"). Stops relying on the LLM to set both
-     needs_context and context_type consistently — the LLM often sets
-     needs_context=True but context_type=None simultaneously.
-  3. route_after_planning uses explicit `is None` guard — `or ""` was turning
-     None into "" which isn't in the routes dict, silently skipping club/rag nodes.
-  4. google_workspace_worker_node:
-     - Caps tools at 5 to prevent context window explosion.
-     - Uses llama-3.1-8b-instant worker LLM (1M TPM) for tool-heavy loops.
-     - System prompt teaches tool contracts so the agent sequences correctly.
-  5. Planning prompt now explicitly lists gmail/calendar as worker types.
-  6. fanout_to_workers routes gmail/calendar to google_workspace_worker.
-  7. Windows-safe logging handler.
-  8. [NEW] Dedicated planning LLM: llama-3.3-70b-versatile for reliable
-     structured output. Configurable via PLANNING_MODEL env var.
-  9. [NEW] Planning node retries up to 3 times on structured output failure.
-  10.[NEW] PLANNING_SYSTEM prompt reinforced: reasoning field listed first
-     and explicitly marked as required to prevent Groq 400 errors.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -33,17 +6,17 @@ import logging
 import operator
 import os
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, List, Literal, Optional, TypedDict
-
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langchain_community.tools import WikipediaQueryRun
 from langchain_community.utilities import WikipediaAPIWrapper
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
+from langgraph.types import Send, Command
 from pydantic import BaseModel, Field, field_validator
 try:
     from langgraph.prebuilt import create_react_agent
@@ -86,7 +59,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# MCP CLIENT POOL — GitHub + Google Workspace only; RAG is called directly
+# MCP CLIENT POOL
 # ============================================================================
 
 class MCPClientPool:
@@ -124,25 +97,6 @@ class MCPClientPool:
             })
             logger.info("GitHub MCP client initialised")
             return self.github_client
-
-    async def get_google_workspace_client(self):
-        if self.google_workspace_client is not None:
-            return self.google_workspace_client
-        async with self._lock:
-            if self.google_workspace_client is not None:
-                return self.google_workspace_client
-            from langchain_mcp_adapters.client import MultiServerMCPClient
-            if not os.getenv("GOOGLE_OAUTH_CLIENT_ID"):
-                raise ValueError("GOOGLE_OAUTH_CLIENT_ID must be set")
-            self.google_workspace_client = MultiServerMCPClient({
-                "google_workspace": {
-                    "transport": "http",
-                    "url": "http://localhost:8001/mcp/",
-                    "headers": {},
-                }
-            })
-            logger.info("Google Workspace MCP client initialised")
-            return self.google_workspace_client
 
     async def cleanup(self):
         for name, client in [
@@ -229,9 +183,9 @@ class ContextItem(BaseModel):
 
 class WorkerTask(BaseModel):
     id: int
-    title: str
+    title: str =""
     worker_type: Literal["github", "conversational", "gmail", "calendar"] = "conversational"
-    description: str
+    description: str=""
     parameters: dict = Field(default_factory=dict)
     requires_context: bool = False
     context_type: Optional[str] = None
@@ -239,12 +193,7 @@ class WorkerTask(BaseModel):
 
 
 class ExecutionPlan(BaseModel):
-    """
-    reasoning is required and must always be the first field populated.
-    context_type is Optional[str] + @field_validator to handle LLM outputting
-    the string "null" instead of JSON null (prevents Groq 400).
-    """
-    reasoning: str  # REQUIRED — always populate this first
+    reasoning: str
     needs_context: bool = False
     context_type: Optional[str] = None
     tasks: List[WorkerTask] = Field(default_factory=list)
@@ -276,6 +225,7 @@ class TaskResult(BaseModel):
 
 
 class OrchestratorState(TypedDict):
+    user_id: str
     user_query: str
     conversation_history: List[str]
     plan: Optional[ExecutionPlan]
@@ -286,30 +236,23 @@ class OrchestratorState(TypedDict):
     tasks: List[WorkerTask]
     results: Annotated[List[TaskResult], operator.add]
     final_response: str
+    # ── HITL: carries the approved/edited payload from confirmation_node
+    #    to google_workspace_worker. None means rejected or not applicable.
+    hitl_approved_payload: Optional[dict]
 
 
 # ============================================================================
 # LLMs
-#
-# worker llm : llama-3.1-8b-instant (smaller, faster, 1M TPM) — used for all workers,
-#
-# planning_llm: llama-3.3-70b-versatile — reliable structured output,
-#               temperature=0.0 for deterministic JSON generation.
-#               Override via PLANNING_MODEL env var.
-#
-# llm:          llama-4-scout-17b (large context) — used for all other nodes
-#               (web search agent, conversational worker, aggregator).
-#               Override via ORCHESTRATOR_MODEL env var.
 # ============================================================================
 
 _model = os.getenv("ORCHESTRATOR_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-llm = ChatGroq(model=_model, temperature=0.7, api_key=os.getenv("GROQ_API_KEY"))
+llm = ChatGroq(model=_model, temperature=0.7, api_key=os.getenv("GROQ_API_KEY"), timeout=30, max_retries=1)
 
 _planning_model = os.getenv("PLANNING_MODEL", "llama-3.3-70b-versatile")
-planning_llm = ChatGroq(model=_planning_model, temperature=0.0, api_key=os.getenv("GROQ_API_KEY"))
+planning_llm = ChatGroq(model=_planning_model, temperature=0.0, api_key=os.getenv("GROQ_API_KEY"), timeout=30, max_retries=1)
 
-_worker_model = os.getenv("WORKER_MODEL", "llama-3.1-8b-instant")
-worker_llm = ChatGroq(model=_worker_model, temperature=0.1, api_key=os.getenv("GROQ_API_KEY"))
+_worker_model = os.getenv("WORKER_MODEL", "llama-3.3-70b-versatile")
+worker_llm = ChatGroq(model=_worker_model, temperature=0.1, api_key=os.getenv("GROQ_API_KEY"), timeout=60, max_retries=1)
 
 
 _wiki_tool = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
@@ -339,7 +282,7 @@ STEP 1 — Choose context_type (pick exactly one):
   "rag"   - user-uploaded research papers or documents needed
   "club"  - robotics club events, announcements, coordinators needed
   "mixed" - multiple context sources needed
-  null    - no external lookup needed (greetings, gmail/calendar tasks, simple chat)
+  null    - no external lookup needed (greetings, direct gmail/calendar tasks, simple chat)
 
 STEP 2 — Populate the matching query list:
   If context_type = "club"  → add queries to club_queries
@@ -352,35 +295,71 @@ STEP 3 — Set needs_context:
   needs_context = true  when context_type is "web", "rag", "club", or "mixed"
   needs_context = false when context_type is null
 
-STEP 4 — Choose worker_type per task:
-  "conversational" - chat, explanation, analysis, answering from retrieved context
-  "github"         - GitHub repos, PRs, files, code
-  "gmail"          - read/search/send emails, summarize inbox
-  "calendar"       - create/read/list events, summarize schedule
+STEP 4 — Choose worker_type and google_service per task:
+  "conversational"            - chat, explanation, analysis, answering from retrieved context
+  "github"                    - GitHub repos, PRs, files, code
+  "gmail"  + google_service="gmail"      - read/search/send emails, summarize inbox
+  "calendar" + google_service="calendar" - create/read/list events, summarize schedule
+
+  IMPORTANT: For ANY gmail or calendar task, you MUST set BOTH:
+    worker_type: "gmail" or "calendar"
+    google_service: "gmail" or "calendar"   ← always set this, never omit it
+
+STEP 5 — Task splitting for "fetch context then act" queries:
+  When the user wants to retrieve information AND then send an email or create
+  a calendar event based on that information, create TWO tasks:
+    Task 1: worker_type="conversational" — retrieves and summarises the context
+    Task 2: worker_type="gmail" or "calendar" — the write action
+  Set context_type to the appropriate source ("rag", "club", "web", or "mixed").
+  The confirmation_node will use the fetched context to draft the email/event fields.
 
 EXAMPLES:
   "What events is the robotics club running?"
     -> reasoning="User wants club event info, routing to club search.",
        context_type="club", needs_context=true, club_queries=["robotics club events"],
-       worker_type="conversational"
-
-  "What does my uploaded paper say about neural networks?"
-    -> reasoning="User references an uploaded document, using RAG.",
-       context_type="rag", needs_context=true, rag_queries=["neural networks"],
-       worker_type="conversational"
+       tasks=[{worker_type="conversational", google_service=null}]
 
   "Summarize my last 5 emails"
-    -> reasoning="Direct Gmail task, no context lookup needed.",
-       context_type=null, needs_context=false, worker_type="gmail"
+    -> reasoning="Direct Gmail read task, no context lookup needed.",
+       context_type=null, needs_context=false,
+       tasks=[{worker_type="gmail", google_service="gmail"}]
+
+  "Send an email to john@example.com about tomorrow's meeting"
+    -> reasoning="Direct Gmail write task, no context lookup needed.",
+       context_type=null, needs_context=false,
+       tasks=[{worker_type="gmail", google_service="gmail", parameters={to: "john@example.com"}}]
+
+  "Search my docs and email the summary to john@example.com"
+    -> reasoning="Needs RAG context first, then Gmail send.",
+       context_type="rag", needs_context=true, rag_queries=["docs summary"],
+       tasks=[
+         {id=1, worker_type="conversational", google_service=null, description="Summarise retrieved docs"},
+         {id=2, worker_type="gmail", google_service="gmail", description="Email summary to john@example.com", parameters={to: "john@example.com"}}
+       ]
+
+  "Check the club schedule and create a calendar event for the next meeting"
+    -> reasoning="Needs club context first, then Calendar create.",
+       context_type="club", needs_context=true, club_queries=["next club meeting schedule"],
+       tasks=[
+         {id=1, worker_type="conversational", google_service=null, description="Find next club meeting from schedule"},
+         {id=2, worker_type="calendar", google_service="calendar", description="Create calendar event for next club meeting"}
+       ]
+
+  "Schedule a standup tomorrow at 10am with alice@co.com"
+    -> reasoning="Direct Calendar write, no context needed.",
+       context_type=null, needs_context=false,
+       tasks=[{worker_type="calendar", google_service="calendar",
+               parameters={summary: "Standup", start: "<tomorrow>T10:00:00", end: "<tomorrow>T10:30:00", attendees: "alice@co.com"}}]
 
   "What is machine learning?"
     -> reasoning="General knowledge question, using web search.",
        context_type="web", needs_context=true, search_queries=["machine learning"],
-       worker_type="conversational"
+       tasks=[{worker_type="conversational", google_service=null}]
 
   "Hi, how are you?"
     -> reasoning="Simple greeting, no lookup needed.",
-       context_type=null, needs_context=false, worker_type="conversational"
+       context_type=null, needs_context=false,
+       tasks=[{worker_type="conversational", google_service=null}]
 """
 
 
@@ -396,7 +375,6 @@ def planning_agent_node(state: OrchestratorState) -> dict:
         HumanMessage(content=f"User Query: {state['user_query'][:500]}"),
     ]
 
-    # Retry up to 3 times — planning_llm is reliable but network/rate errors happen
     plan: ExecutionPlan | None = None
     last_exc: Exception | None = None
     for attempt in range(1, 4):
@@ -411,14 +389,6 @@ def planning_agent_node(state: OrchestratorState) -> dict:
         logger.error(f"All planning attempts failed. Last error: {last_exc}")
         raise last_exc
 
-    # ------------------------------------------------------------------
-    # Post-processing: infer context_type from query lists.
-    #
-    # The LLM often outputs needs_context=True but context_type=None
-    # simultaneously — an inconsistency we can't prevent in the schema.
-    # Solution: if any query list is populated, derive context_type from
-    # it instead of trusting the LLM's context_type field directly.
-    # ------------------------------------------------------------------
     has_club = bool(plan.club_queries)
     has_rag  = bool(plan.rag_queries)
     has_web  = bool(plan.search_queries)
@@ -680,69 +650,168 @@ GITHUB_TOOLS = [
     "search_repositories", "get_me",
 ]
 
+PARAM_TYPE_MAP = {
+    "search_repositories": {"perPage": int, "page": int},
+    "list_pull_requests": {"perPage": int, "page": int},
+    "create_pull_request": {"draft": bool},
+}
+
+def fix_tool_parameters(tool_call: dict) -> dict:
+    tool_name = tool_call.get("name")
+    parameters = tool_call.get("parameters", {})
+    if tool_name in PARAM_TYPE_MAP:
+        for param_name, expected_type in PARAM_TYPE_MAP[tool_name].items():
+            if param_name in parameters:
+                value = parameters[param_name]
+                if expected_type == int and isinstance(value, str):
+                    try:
+                        parameters[param_name] = int(value)
+                    except ValueError:
+                        pass
+                elif expected_type == bool and isinstance(value, str):
+                    parameters[param_name] = value.lower() == "true"
+    return tool_call
+
 
 async def github_worker_node(payload: dict) -> dict:
+    from auth.mcp_token_bridge import get_github_client_for_user
+    from auth.github_oauth import clear_github_token
+    from langchain.agents import create_agent
+
     task_data = payload["task"]
     context = payload.get("context", "")
     task_id = task_data["id"]
-    print(f"  GITHUB: task {task_id}")
+    user_id = payload.get("user_id")
+
+    print(f"\n  GITHUB_WORKER: Task {task_id} for user {user_id}")
+
+    if not user_id:
+        return {"results": [TaskResult(
+            task_id=task_id, worker_type="github", success=False,
+            output="No user_id in payload — cannot fetch GitHub token."
+        )]}
+
+    client = await get_github_client_for_user(user_id)
+    if client is None:
+        return {"results": [TaskResult(
+            task_id=task_id, worker_type="github", success=False,
+            output="GitHub account not connected. Please connect in Settings → Integrations."
+        )]}
+
     try:
-        client = await mcp_pool.get_github_client()
         all_tools = await client.get_tools()
         filtered = [t for t in all_tools if t.name in GITHUB_TOOLS]
+
         if not filtered:
-            return {"results": [TaskResult(task_id=task_id, worker_type="github",
-                                           success=False, output="No GitHub tools")]}
-        agent = create_react_agent(worker_llm, filtered)
+            return {"results": [TaskResult(
+                task_id=task_id, worker_type="github", success=False,
+                output="No GitHub tools available."
+            )]}
+
+        agent = create_agent(worker_llm, filtered)
+
         prompt = (
             "Github username: nainaamodii\n"+
             f"GitHub Task: {task_data.get('description', '')}\n"
             + (f"\nContext:\n{context[:800]}\n" if context else "")
-            + f"\nQuery: {payload.get('user_query', '')}"
+            + f"\nQuery: {payload.get('user_query', '')}\n\n"
+            "IMPORTANT: Ensure numeric params like perPage/page are numbers, not strings\n"
         )
+
         response = await agent.ainvoke({"messages": [{"role": "user", "content": prompt}]})
+
+        if "tool_calls" in response:
+            response["tool_calls"] = [fix_tool_parameters(c) for c in response["tool_calls"]]
+
         output = next(
             (m.content for m in reversed(response.get("messages", []))
              if getattr(m, "content", None)),
             str(response),
         )
-        return {"results": [TaskResult(task_id=task_id, worker_type="github",
-                                       success=True, output=output,
-                                       used_context=bool(context))]}
-    except Exception as exc:
-        logger.error(f"GitHub task {task_id} failed: {exc}")
-        return {"results": [TaskResult(task_id=task_id, worker_type="github",
-                                       success=False, output=f"GitHub failed: {exc}",
-                                       error=str(exc))]}
 
+        return {"results": [TaskResult(
+            task_id=task_id, worker_type="github", success=True,
+            output=output, used_context=bool(context)
+        )]}
+
+    except Exception as exc:
+        error_str = str(exc)
+        if "401" in error_str or "unauthorized" in error_str.lower():
+            await clear_github_token(user_id)
+            return {"results": [TaskResult(
+                task_id=task_id, worker_type="github", success=False,
+                output="GitHub token revoked. Please reconnect in Settings → Integrations.",
+                error=error_str,
+            )]}
+
+        logger.error(f"GitHub task {task_id} failed: {exc}")
+        return {"results": [TaskResult(
+            task_id=task_id, worker_type="github", success=False,
+            output=f"GitHub failed: {exc}", error=error_str
+        )]}
+
+
+from auth.mcp_token_bridge import get_google_workspace_client_for_user
 
 async def google_workspace_worker_node(payload: dict) -> dict:
-    task_data = payload["task"]
-    context = payload.get("context", "")
-    task_id = task_data["id"]
-    user_query = payload.get("user_query", "")
+    # ── FIX: handle both Send(payload) and state-based invocation ────
+    # When called via Send() from fanout or confirmation_node, payload
+    # has "task" key. When called from hitl_google_worker_node via state,
+    # we read from state["hitl_approved_payload"]. Both cases handled here.
+    if "task" in payload:
+        task_data  = payload["task"]
+        context    = payload.get("context", "")
+        user_query = payload.get("user_query", "")
+        user_id    = payload.get("user_id") or ""
+    else:
+        task_data  = payload
+        context    = ""
+        user_query = ""
+        user_id    = ""
+
+    task_id = task_data.get("id", 0)
     google_service = (
-        task_data.get("google_service") or task_data.get("worker_type", "")
+        (task_data.get("google_service") or task_data.get("worker_type") or "")
     ).lower()
     print(f"  GOOGLE_WORKER: Task {task_id} ({google_service})")
 
     try:
-        client = await mcp_pool.get_google_workspace_client()
+        if not user_id:
+            return {"results": [TaskResult(
+                task_id=task_id, worker_type=f"google_{google_service}",
+                success=False,
+                output="Google action failed: no user_id. Please log in again.",
+                error="missing_user_id",
+            )]}
+
+        client = await get_google_workspace_client_for_user(user_id=user_id)
+        if client is None:
+            return {"results": [TaskResult(
+                task_id=task_id, worker_type="google",
+                success=False,
+                output="Google account not connected. Please connect in Settings."
+            )]}
+
         all_tools = await client.get_tools()
 
         gmail_kw = {"gmail", "email", "message", "inbox", "send", "draft", "thread", "label"}
         cal_kw   = {"calendar", "event", "schedule", "meeting", "attendee"}
 
+        # In google_workspace_worker_node, replace the filter section:
+
         if google_service == "gmail":
             filtered = [t for t in all_tools
                         if any(kw in t.name.lower() for kw in gmail_kw)]
         elif google_service == "calendar":
-            filtered = [t for t in all_tools
-                        if any(kw in t.name.lower() for kw in cal_kw)]
+            # Use exact names — keyword match accidentally includes create_calendar
+            CALENDAR_TOOLS = {
+                "list_calendars", "get_events", "manage_event",
+                "create_event", "modify_event", "delete_event"
+            }
+            filtered = [t for t in all_tools if t.name in CALENDAR_TOOLS]
         else:
             filtered = all_tools
 
-        # Cap at 5 — each tool schema ~1800 tokens; prevents context explosion
         filtered = filtered[:5]
 
         if not filtered:
@@ -753,53 +822,93 @@ async def google_workspace_worker_node(payload: dict) -> dict:
         logger.info(f"Google {google_service}: {len(filtered)} tools: "
                     f"{[t.name for t in filtered]}")
 
-
         if google_service == "gmail":
             system_content = """You are a Gmail assistant. Use the available Gmail tools to fulfill requests.
 
 Tool contracts:
 - search_gmail_messages(query, max_results) -> list of objects, each with an "id" field.
-  Call this first whenever you need to find or list emails.
-  For "last N emails": query="", max_results=N.
-  For emails from a sender: query="from:address@example.com".
-  For emails with a keyword: query="the keyword".
 - get_gmail_message_content(message_id) -> full email: subject, sender, date, body.
 - get_gmail_messages_content_batch(message_ids) -> content of multiple emails.
-  IMPORTANT: message_ids must be a non-empty list of IDs from search_gmail_messages.
-  Never call this with an empty list.
-- send_gmail_message(to, subject, body) -> sends an email. No prior search needed.
-- get_gmail_attachment_content(message_id, attachment_id) -> retrieves an attachment.
+  IMPORTANT: message_ids must be a non-empty list. Never call with empty list.
+- send_gmail_message(to, subject, body) -> sends an email.
+- get_gmail_attachment_content(message_id, attachment_id) -> retrieves attachment.
 
 Present email summaries as: Subject | From | Date | Key points (2 lines max each).
-gmail handdle is : nainaamodii@gmail.com
-"""
 
+EXECUTION RULES:
+- Call each tool ONCE only. Never repeat a tool call.
+- After a successful tool response (even 202 Accepted), consider the action DONE.
+- Do NOT retry if you receive a confirmation or an ID in the response.
+- Respond to the user immediately after one successful tool call.
+"""
         elif google_service == "calendar":
-            system_content = """You are a Google Calendar assistant. Use the available Calendar tools.
 
-Tool contracts:
-- List/search tools -> return event objects: id, summary, start, end, attendees, description.
-  Call a list tool first when reading or summarizing a schedule.
-- Create tools -> require at minimum: summary (title), start datetime (ISO), end datetime (ISO).
-  Extract these directly from the user request.
-- Update tools -> require event id. Search/list first to get the id, then update.
+          
+          
+          
+          
+          system_content = """You are a Google Calendar assistant. Use ONLY these exact tools:
+ 
+AVAILABLE TOOLS:
+1. list_calendars()
+   - Lists all calendars. Call this first if you need a calendar_id other than "primary".
+   - Returns: list of calendars with id, summary fields.
+ 
+2. get_events(calendar_id, time_min, time_max, max_results)
+   - Retrieves events from a calendar.
+   - calendar_id: use "primary" unless user specifies another calendar
+   - time_min / time_max: ISO 8601 format REQUIRED e.g. "2026-04-12T00:00:00Z"
+   - max_results: integer e.g. 10
+   - FORBIDDEN parameters: do NOT include "detailed", "single_events", or any other param
+ 
+3. manage_event(calendar_id, summary, start_time, end_time, description, location, attendees, event_id)
+   - USE THIS to CREATE a new event (omit event_id)
+   - USE THIS to UPDATE an existing event (include event_id)
+   - calendar_id: use "primary" unless user specifies
+   - start_time / end_time: ISO 8601 format REQUIRED e.g. "2026-04-12T10:00:00Z"
+   - summary: event title (string)
+   - description: optional event description (string)
+   - location: optional location (string)
+   - attendees: optional list of email strings e.g. ["user@gmail.com"]
+   - event_id: only for updates, get it from get_events first
+ 
+4. create_calendar(summary)
+   - Creates a BRAND NEW separate calendar (like "Work" or "Personal")
+   - DO NOT use this to create events — use manage_event instead
+   - Only call this if the user explicitly says "create a new calendar"
+ 
+CRITICAL RULES:
+- To create an EVENT → use manage_event (NOT create_calendar)
+- To update an EVENT → use manage_event with event_id
+- Never pass Python booleans (True/False) — use JSON (true/false)
+- Never pass undefined parameters to any tool
+- If time is not specified, use a reasonable default (e.g. 1 hour from now)
+- Always use "primary" as calendar_id unless user specifies a different calendar name
+ 
+WORKFLOW FOR CREATING AN EVENT:
+1. Call manage_event directly with summary, start_time, end_time, calendar_id="primary"
+2. Do NOT call list_calendars first unless user mentions a specific calendar name
+ 
+WORKFLOW FOR READING EVENTS:
+1. Call get_events with calendar_id="primary", time_min, time_max, max_results=10
+2. Do NOT include any extra parameters beyond these four
 
-Present schedules in chronological order: Date | Time | Event title | Key details.
-gmail handdle is : nainaamodii@gmail.com
+EXECUTION RULES:
+- Call each tool ONCE only. Never repeat a tool call.
+- After a successful tool response (even 202 Accepted), consider the action DONE.
+- Do NOT retry if you receive a confirmation or an ID in the response.
+- Respond to the user immediately after one successful tool call.
 """
-
         else:
             system_content = (
                 "You are a Google Workspace assistant. "
-                "When a tool returns IDs or references, pass them as input to "
-                "subsequent tools that need them. Be concise."
-                "gmail handdle is : nainaamodii@gmail.com"
+                "When a tool returns IDs or references, pass them to subsequent tools. Be concise."
             )
 
         task_desc = task_data.get("description", "")[:500]
         prompt = f"User request: {user_query}\nTask: {task_desc}"
         if context:
-            prompt += f"\n\nAdditional context:\n{context[:400]}"
+            prompt += f"\n\nAdditional context:\n{context[:1500]}"
 
         agent = create_react_agent(worker_llm, filtered)
         response = await agent.ainvoke({
@@ -844,11 +953,10 @@ async def conversational_worker_node(payload: dict) -> dict:
             None,
             lambda: llm.invoke([
                 SystemMessage(content=(
-                    ''''You are a helpful Robotic club assistant. You can retrieve context from user docs, web,and robotic club resources.
-                    You have capability to execute gmail, google calendar and github operations for user.
-                    You are here to assist the robotic club member and improve their productivity.
-                    When context is provided, '''
-                    "base your answer on it and cite specific details."
+                    "You are a helpful Robotic club assistant. You can retrieve context from user docs, web, and robotic club resources. "
+                    "You have capability to execute gmail, google calendar and github operations for user. "
+                    "You are here to assist the robotic club member and improve their productivity. "
+                    "When context is provided, base your answer on it and cite specific details."
                 )),
                 HumanMessage(content=prompt),
             ]),
@@ -864,32 +972,39 @@ async def conversational_worker_node(payload: dict) -> dict:
 
 
 # ============================================================================
-# FANOUT — always inject context; route gmail/calendar to google_workspace_worker
+# FANOUT (original — no HITL, kept for reference)
 # ============================================================================
 
 def fanout_to_workers(state: OrchestratorState):
     context = state.get("combined_context", "")
+    user_id = state.get("user_id", "")
+
     sends = []
     for task in state["tasks"]:
-        task_dict = task.model_dump()
-
-        # Fill google_service from worker_type if planner left it blank
-        if task.worker_type in ("gmail", "calendar") and not task_dict.get("google_service"):
-            task_dict["google_service"] = task.worker_type
-
-        payload: dict = {"task": task_dict, "user_query": state["user_query"]}
+        payload = {
+            "task": task.model_dump(),
+            "user_query": state["user_query"],
+            "user_id": user_id,
+        }
         if context:
             payload["context"] = context
-
-        if task.worker_type == "github":
+ 
+        wtype = task.worker_type.lower()
+ 
+        if wtype == "github":
             sends.append(Send("github_worker", payload))
-        elif task.worker_type in ("gmail", "calendar"):
+        elif task.worker_type in ("gmail", "calendar") or \
+             task.worker_type.startswith("google_") or task.google_service:
             sends.append(Send("google_workspace_worker", payload))
+ 
         else:
             sends.append(Send("conversational_worker", payload))
-
+ 
     return sends
 
+# ============================================================================
+# AGGREGATOR
+# ============================================================================
 
 # ============================================================================
 # AGGREGATOR
@@ -920,10 +1035,86 @@ async def results_aggregator_node(state: OrchestratorState) -> dict:
 
 
 # ============================================================================
-# GRAPH
+# HITL GRAPH NODES
+# ============================================================================
+
+def fanout_to_workers_hitl(state: OrchestratorState):
+    """
+    Routes tasks to workers. Google tasks go to confirmation_node first.
+    GitHub and conversational bypass HITL.
+    """
+    context = state.get("combined_context", "")
+    user_id = state.get("user_id", "")
+
+    sends = []
+    for task in state["tasks"]:
+        payload = {
+            "task": task.model_dump(),
+            "user_query": state["user_query"],
+            "user_id": user_id,
+        }
+        if context:
+            payload["context"] = context
+
+        if task.worker_type == "github":
+            sends.append(Send("github_worker", payload))
+        elif task.worker_type in ("gmail", "calendar") or \
+             task.worker_type.startswith("google_") or task.google_service:
+            # ALL Google tasks → confirmation gate first
+            sends.append(Send("confirmation_node", payload))
+        else:
+            sends.append(Send("conversational_worker", payload))
+    return sends
+
+
+async def confirmation_node_wrapper(state: OrchestratorState) -> dict:
+    """
+    State-based wrapper that confirmation_node's Send() output writes into.
+
+    confirmation_node (called via Send) writes its result — either
+    {"hitl_approved_payload": payload} or {"results": [cancelled_result]} —
+    into the state. This node reads hitl_approved_payload and passes it
+    forward. The conditional edge route_after_confirmation then decides
+    whether to call the google worker or go straight to aggregator.
+
+    NOTE: This node is NOT used. confirmation_node writes directly to state
+    via its return dict. See confirmation_node in hitl/confirmation.py.
+    """
+    return {}
+
+
+def route_after_confirmation(state: OrchestratorState) -> str:
+    """
+    After confirmation_node runs:
+    - If hitl_approved_payload is set → user approved → run google worker
+    - Otherwise → user rejected or read-only already handled → go to aggregator
+    """
+    payload = state.get("hitl_approved_payload")
+    if payload:
+        return "hitl_google_worker"
+    return "aggregator"
+
+
+async def hitl_google_worker_node(state: OrchestratorState) -> dict:
+    """
+    Dedicated google worker node called after HITL approval.
+    Reads the approved payload from state instead of a Send() payload.
+    """
+    payload = state.get("hitl_approved_payload")
+    if not payload:
+        return {"results": []}
+    # Clear the approved payload so it doesn't re-trigger on replay
+    result = await google_workspace_worker_node(payload)
+    result["hitl_approved_payload"] = None
+    return result
+
+
+# ============================================================================
+# GRAPH BUILDERS
 # ============================================================================
 
 def build_smart_orchestrator():
+    """Original graph — no HITL."""
     g = StateGraph(OrchestratorState)
 
     g.add_node("planning",               planning_agent_node)
@@ -938,34 +1129,83 @@ def build_smart_orchestrator():
     g.add_node("aggregator",             results_aggregator_node)
 
     g.add_edge(START, "planning")
-    g.add_conditional_edges(
-        "planning",
-        route_after_planning,
-        {
-            "web_search":           "web_search",
-            "rag_search":           "rag_search",
-            "club_search":          "club_search",
-            "gather_mixed_context": "gather_mixed_context",
-            "execute_tasks":        "execute_tasks",
-        },
-    )
+    g.add_conditional_edges("planning", route_after_planning, {
+        "web_search": "web_search", "rag_search": "rag_search",
+        "club_search": "club_search", "gather_mixed_context": "gather_mixed_context",
+        "execute_tasks": "execute_tasks",
+    })
     for ctx in ("web_search", "rag_search", "club_search", "gather_mixed_context"):
         g.add_edge(ctx, "execute_tasks")
-
-    g.add_conditional_edges(
-        "execute_tasks",
-        fanout_to_workers,
-        {
-            "github_worker":           "github_worker",
-            "google_workspace_worker": "google_workspace_worker",
-            "conversational_worker":   "conversational_worker",
-        },
-    )
+    g.add_conditional_edges("execute_tasks", fanout_to_workers, {
+        "github_worker": "github_worker",
+        "google_workspace_worker": "google_workspace_worker",
+        "conversational_worker": "conversational_worker",
+    })
     for w in ("github_worker", "google_workspace_worker", "conversational_worker"):
         g.add_edge(w, "aggregator")
     g.add_edge("aggregator", END)
-
     return g.compile()
+
+
+def build_smart_orchestrator_with_hitl(checkpointer=None):
+    """
+    HITL graph.
+
+    confirmation_node (called via Send from execute_tasks) receives the task
+    payload, calls interrupt(), and on resume returns either:
+      {"hitl_approved_payload": payload}  → approved
+      {"results": [TaskResult(...)]}      → rejected
+
+    route_after_confirmation reads hitl_approved_payload from state to decide
+    whether to call hitl_google_worker or skip to aggregator.
+    """
+    from hitl.confirmation import confirmation_node
+
+    g = StateGraph(OrchestratorState)
+
+    g.add_node("planning",                planning_agent_node)
+    g.add_node("web_search",              web_search_node)
+    g.add_node("rag_search",              rag_search_node)
+    g.add_node("club_search",             club_search_node)
+    g.add_node("gather_mixed_context",    gather_mixed_context_node)
+    g.add_node("execute_tasks",           lambda s: s)
+    g.add_node("github_worker",           github_worker_node)
+    g.add_node("conversational_worker",   conversational_worker_node)
+    g.add_node("aggregator",              results_aggregator_node)
+
+    # ── HITL nodes ──
+    g.add_node("confirmation_node",       confirmation_node)
+    g.add_node("hitl_google_worker",      hitl_google_worker_node)
+    # NOTE: google_workspace_worker is NOT in this graph —
+    # all Google tasks go through confirmation_node → hitl_google_worker
+
+    g.add_edge(START, "planning")
+    g.add_conditional_edges("planning", route_after_planning, {
+        "web_search": "web_search", "rag_search": "rag_search",
+        "club_search": "club_search", "gather_mixed_context": "gather_mixed_context",
+        "execute_tasks": "execute_tasks",
+    })
+    for ctx in ("web_search", "rag_search", "club_search", "gather_mixed_context"):
+        g.add_edge(ctx, "execute_tasks")
+
+    # ── Fanout: Google → confirmation, others → direct workers ──
+    g.add_conditional_edges("execute_tasks", fanout_to_workers_hitl, {
+        "github_worker":         "github_worker",
+        "confirmation_node":     "confirmation_node",
+        "conversational_worker": "conversational_worker",
+    })
+
+    # ── After confirmation: approved → hitl_google_worker, rejected → aggregator ──
+    g.add_conditional_edges("confirmation_node", route_after_confirmation, {
+        "hitl_google_worker": "hitl_google_worker",
+        "aggregator":         "aggregator",
+    })
+
+    for w in ("github_worker", "conversational_worker", "hitl_google_worker"):
+        g.add_edge(w, "aggregator")
+    g.add_edge("aggregator", END)
+
+    return g.compile(checkpointer=checkpointer)
 
 
 # ============================================================================
@@ -973,8 +1213,23 @@ def build_smart_orchestrator():
 # ============================================================================
 
 class SmartOrchestrator:
+    """
+    Smart Orchestrator with Human-in-the-Loop for Google write actions.
+
+    process() → may return interrupted=True with confirmation_required
+    resume()  → resumes the frozen graph with user's approve/reject + edits
+    """
+
     def __init__(self):
-        self.graph = build_smart_orchestrator()
+        from hitl.checkpointer import get_checkpointer
+        self._checkpointer = get_checkpointer()
+        self.graph = build_smart_orchestrator_with_hitl(checkpointer=self._checkpointer)
+
+        # Maps user_id → {"thread_id": str, "message": str}
+        # Stores the ACTUAL thread_id used (includes random suffix) so resume
+        # can find the right checkpoint even though the API key is user_id.
+        self._pending_confirmations: dict[str, dict] = {}
+
         rag_ok = get_rag_retrieval_service() is not None
         print(f"\n{'='*60}")
         print(f"SMART ORCHESTRATOR READY  (model: {_model})")
@@ -983,45 +1238,142 @@ class SmartOrchestrator:
         print(f"  Club RAG     : lazy (initialises on first club query)")
         print(f"  Workers      : conversational | github | gmail | calendar")
         print(f"  Worker LLM   : {os.getenv('WORKER_MODEL', 'llama-3.1-8b-instant')}")
+        print(f"  HITL         : ENABLED (gmail send / calendar create/update/delete)")
         print(f"{'='*60}")
 
+    def _make_config(self, thread_id: str) -> dict:
+        return {"configurable": {"thread_id": thread_id}}
+
+    def _extract_interrupt(self, state_or_exc, user_id: str, thread_id: str) -> dict | None:
+        """Detect LangGraph interrupt from state dict or exception."""
+        # Pattern 1: embedded in returned state
+        if isinstance(state_or_exc, dict):
+            interrupt_data = state_or_exc.get("__interrupt__")
+            if interrupt_data:
+                msg = interrupt_data[0].value if hasattr(interrupt_data[0], "value") \
+                      else str(interrupt_data[0])
+                self._pending_confirmations[user_id] = {"thread_id": thread_id, "message": msg}
+                return {
+                    "success": True, "interrupted": True,
+                    "confirmation_required": {"message": msg, "thread_id": user_id},
+                }
+            return None
+
+        # Pattern 2: raised as exception
+        exc = state_or_exc
+        if "interrupt" not in type(exc).__name__.lower() and \
+           "Interrupt" not in type(exc).__name__:
+            return None
+
+        try:
+            val = exc.value if hasattr(exc, "value") else str(exc)
+            if isinstance(val, (list, tuple)) and val:
+                val = val[0].value if hasattr(val[0], "value") else str(val[0])
+            msg = str(val)
+        except Exception:
+            msg = str(exc)
+
+        self._pending_confirmations[user_id] = {"thread_id": thread_id, "message": msg}
+        return {
+            "success": True, "interrupted": True,
+            "confirmation_required": {"message": msg, "thread_id": user_id},
+        }
+
+    def _build_success_response(self, final: dict) -> dict:
+        results = final.get("results", [])
+        return {
+            "success": True, "interrupted": False,
+            "response": final.get("final_response", ""),
+            "metadata": {
+                "total_tasks":      len(results),
+                "successful_tasks": sum(1 for r in results if r.success),
+                "web_search_used":  bool(final.get("web_context")),
+                "rag_search_used":  bool(final.get("rag_context")),
+                "club_search_used": bool(final.get("club_context")),
+                "workers_used":     list({r.worker_type for r in results}),
+            },
+        }
+
     async def process(self, user_query: str,
-                      conversation_history: List[str] = None) -> dict:
+                      conversation_history: List[str] = None,
+                      user_id: str = "") -> dict:
         if not user_query or not user_query.strip():
-            return {"success": False, "response": "Empty query.", "metadata": {}}
+            return {"success": False, "interrupted": False,
+                    "response": "Empty query.", "metadata": {}}
+
+        # ── FIX: unique thread_id per query prevents stale checkpoint replay ──
+        thread_id = f"{user_id}_{uuid.uuid4().hex[:8]}" if user_id else uuid.uuid4().hex
+        config    = self._make_config(thread_id)
 
         state: OrchestratorState = {
-            "user_query": user_query.strip(),
-            "conversation_history": conversation_history or [],
-            "plan": None,
-            "web_context": [],
-            "rag_context": [],
-            "club_context": [],
-            "combined_context": "",
-            "tasks": [],
-            "results": [],
-            "final_response": "",
+            "user_id":                user_id,
+            "user_query":             user_query.strip(),
+            "conversation_history":   conversation_history or [],
+            "plan":                   None,
+            "web_context":            [],
+            "rag_context":            [],
+            "club_context":           [],
+            "combined_context":       "",
+            "tasks":                  [],
+            "results":                [],
+            "final_response":         "",
+            "hitl_approved_payload":  None,
         }
         try:
-            final = await self.graph.ainvoke(state)
-            results = final.get("results", [])
-            return {
-                "success": True,
-                "response": final["final_response"],
-                "metadata": {
-                    "total_tasks":      len(results),
-                    "successful_tasks": sum(1 for r in results if r.success),
-                    "web_search_used":  bool(final.get("web_context")),
-                    "rag_search_used":  bool(final.get("rag_context")),
-                    "club_search_used": bool(final.get("club_context")),
-                    "workers_used":     list({r.worker_type for r in results}),
-                },
-            }
+            final = await self.graph.ainvoke(state, config=config)
+            interrupt_resp = self._extract_interrupt(final, user_id, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
+            return self._build_success_response(final)
+
         except Exception as exc:
+            interrupt_resp = self._extract_interrupt(exc, user_id, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
             logger.error(f"Orchestrator error: {exc}", exc_info=True)
-            return {"success": False,
-                    "response": f"Orchestrator error: {exc}",
+            return {"success": False, "interrupted": False,
+                    "response": f"Orchestrator error: {exc}", "metadata": {}}
+
+    async def resume(self, user_id: str, user_response: str) -> dict:
+        """
+        Resume a frozen graph. user_id is the key passed from the API
+        (the frontend sends back thread_id which equals user_id).
+        The actual LangGraph thread_id (with UUID suffix) is looked up
+        from _pending_confirmations.
+        """
+        pending = self._pending_confirmations.pop(user_id, None)
+        if not pending:
+            return {"success": False, "interrupted": False,
+                    "response": "No pending confirmation found. It may have expired.",
                     "metadata": {}}
+
+        thread_id = pending["thread_id"]
+        config    = self._make_config(thread_id)
+
+        try:
+            final = await self.graph.ainvoke(
+                Command(resume=user_response),
+                config=config,
+            )
+            interrupt_resp = self._extract_interrupt(final, user_id, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
+            return self._build_success_response(final)
+
+        except Exception as exc:
+            interrupt_resp = self._extract_interrupt(exc, user_id, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
+            logger.error(f"Resume error: {exc}", exc_info=True)
+            return {"success": False, "interrupted": False,
+                    "response": f"Resume error: {exc}", "metadata": {}}
+
+    def is_pending_confirmation(self, user_id: str) -> bool:
+        return user_id in self._pending_confirmations
+
+    def get_pending_message(self, user_id: str) -> str | None:
+        entry = self._pending_confirmations.get(user_id)
+        return entry["message"] if entry else None
 
     async def cleanup(self):
         await mcp_pool.cleanup()

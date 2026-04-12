@@ -6,10 +6,17 @@ import UploadDocs from './Components/UploadDocs';
 import { useApiHealth } from './hooks/useApiHealth';
 import { useThreads } from './hooks/useThreads';
 import './App.css';
+import { AuthProvider } from "./context/AuthContext";
+import { useAuth } from "./context/AuthContext";
+import LoginPage from "./Components/auth/LoginPage";
+import ProfilePage from "./Components/auth/ProfilePage";
 
-function App() {
+// ── Inner app — only rendered when authenticated ───────────────────────────
+function AuthenticatedApp() {
+  const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  
+  const [showProfile, setShowProfile] = useState(false);
+
   const health = useApiHealth({
     autoCheck: true,
     interval: 30000,
@@ -30,14 +37,8 @@ function App() {
 
   const [showConnectionStatus, setShowConnectionStatus] = useState(false);
 
-  const handleNewThread = async () => {
-    await createThread();
-  };
-
-  const handleSelectThread = (threadId) => {
-    selectThread(threadId);
-  };
-
+  const handleNewThread = async () => { await createThread(); };
+  const handleSelectThread = (threadId) => { selectThread(threadId); };
   const handleDeleteThread = async (threadId) => {
     try {
       await deleteThread(threadId);
@@ -46,7 +47,6 @@ function App() {
       alert('Failed to delete chat. Please try again.');
     }
   };
-
   const handleMessageSent = (threadId, message) => {
     updateThreadPreview(threadId, message);
   };
@@ -62,7 +62,6 @@ function App() {
 
   const ConnectionStatusBanner = () => {
     if (!showConnectionStatus && health.isHealthy) return null;
-
     return (
       <div className={`connection-banner ${health.isHealthy ? 'success' : 'error'}`}>
         <div className="connection-icon">
@@ -88,10 +87,19 @@ function App() {
     );
   };
 
+  // Show profile page as a full overlay when toggled
+  if (showProfile) {
+    return (
+      <div className="App">
+        <ProfilePage onBack={() => setShowProfile(false)} />
+      </div>
+    );
+  }
+
   return (
     <div className="App">
       <ConnectionStatusBanner />
-      
+
       <div className="app-layout">
         {sidebarOpen && (
           <ThreadSidebar
@@ -120,21 +128,21 @@ function App() {
                 <div className="app-subtitle">
                   <span className={`status-dot ${health.isHealthy ? 'connected' : 'disconnected'}`}></span>
                   <span>
-                    {health.isHealthy ? 'Connected' : 'Disconnected'} • 
+                    {health.isHealthy ? 'Connected' : 'Disconnected'} •&nbsp;
                     Uptime: {Math.round(health.data?.uptime_seconds || 0)}s
                   </span>
                 </div>
               </div>
             </div>
-            
+
             <div className="header-actions">
-              <UploadDocs 
+              <UploadDocs
                 onUploadSuccess={(result) => {
                   console.log('PDF uploaded:', result);
                   alert(`PDF "${result.filename}" uploaded and indexed successfully!`);
                 }}
               />
-              
+
               <button
                 className="status-button"
                 onClick={() => setShowConnectionStatus(!showConnectionStatus)}
@@ -145,12 +153,23 @@ function App() {
                 </span>
                 Status
               </button>
+
+              {/* Profile / Settings button */}
+              <button
+                className="profile-button"
+                onClick={() => setShowProfile(true)}
+                title={`Signed in as ${user?.email}`}
+              >
+                <span className="profile-avatar">
+                  {user?.email?.[0]?.toUpperCase() || '?'}
+                </span>
+              </button>
             </div>
           </header>
 
           <main className="app-main">
             {currentThreadId ? (
-              <ChatContainer 
+              <ChatContainer
                 threadId={currentThreadId}
                 isBackendConnected={health.isHealthy}
                 onMessageSent={handleMessageSent}
@@ -171,6 +190,35 @@ function App() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Auth gate — shown while loading or when logged out ─────────────────────
+function AppGate() {
+  const { isAuthenticated, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="loading-screen">
+        <div className="spinner"></div>
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <LoginPage />;
+  }
+
+  return <AuthenticatedApp />;
+}
+
+// ── Root — AuthProvider wraps everything ───────────────────────────────────
+function App() {
+  return (
+    <AuthProvider>
+      <AppGate />
+    </AuthProvider>
   );
 }
 
