@@ -1,6 +1,4 @@
 // frontend/src/api/httpClient.js
-// DELETE YOUR OLD FILE AND COPY THIS EXACTLY
-
 class HttpClient {
   constructor(baseURL) {
     this.baseURL = baseURL;
@@ -15,10 +13,15 @@ class HttpClient {
     const config = {
       ...options,
       headers: {
-        'Content-Type': 'application/json',
         ...options.headers,
       },
     };
+
+    if (options.body && options.body instanceof FormData) {
+      delete config.headers['Content-Type'];
+    } else if (!config.headers['Content-Type']) {
+      config.headers['Content-Type'] = 'application/json';
+    }
 
     try {
       const response = await fetch(url, config);
@@ -51,7 +54,7 @@ class HttpClient {
     return this.request(endpoint, {
       ...options,
       method: 'POST',
-      body: JSON.stringify(data),
+      body: data instanceof FormData ? data : JSON.stringify(data),
     });
   }
 
@@ -76,7 +79,6 @@ class HttpClient {
   }
 }
 
-// CRITICAL: Must end with /api
 const BASE_URL = 'http://localhost:8000/api';
 
 console.log('🌐 Initializing httpClient with BASE_URL:', BASE_URL);

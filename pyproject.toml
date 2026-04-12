@@ -1,0 +1,10 @@
+[project]
+name = "agentic-chatbot-final"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "langgraph-cli[inmem]>=0.4.19",
+    "wikipedia>=1.4.0",
+]

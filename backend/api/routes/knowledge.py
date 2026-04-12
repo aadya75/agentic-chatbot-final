@@ -1,15 +1,12 @@
-"""
-API Routes for Knowledge Base Management (Supabase backend)
-Handles resource upload, listing, and deletion
-"""
-
-import os
-import tempfile
-import uuid
+# backend/api/routes/knowledge.py
 from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from typing import Dict, Optional
+import tempfile
+import uuid
+import os
 from dotenv import load_dotenv
+from supabase import create_client
 
 load_dotenv()
 
@@ -22,21 +19,16 @@ from knowledge_engine.retrieval import HybridRetrieval
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", os.getenv("SUPABASE_ANON_KEY", ""))
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./data/uploads")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "UserDocs")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "384"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
 
-USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY)
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
 
-# ---------------------------------------------------------------------------
-# Singleton services
-# ---------------------------------------------------------------------------
 _services_initialized = False
 _embedding_service: Optional[EmbeddingService] = None
 _vector_store: Optional[SupabaseVectorStore] = None
@@ -48,7 +40,6 @@ _processing_status: Dict[str, Dict] = {}
 
 
 def get_services() -> Dict:
-    """Lazily initialise and return knowledge engine services."""
     global _services_initialized
     global _embedding_service, _vector_store, _graph_store
     global _chunker, _ingestion_service, _retrieval_service
@@ -65,18 +56,12 @@ def get_services() -> Dict:
 
     _embedding_service = EmbeddingService(embedding_dim=EMBEDDING_DIM)
 
-    if not USE_SUPABASE:
-        raise RuntimeError(
-            "SUPABASE_URL and SUPABASE_SERVICE_KEY (or SUPABASE_ANON_KEY) must be set."
-        )
-
     _vector_store = SupabaseVectorStore(
         supabase_url=SUPABASE_URL,
         supabase_key=SUPABASE_KEY,
         embedding_dim=EMBEDDING_DIM,
     )
 
-    # Optional Neo4j graph store
     neo4j_uri = os.getenv("NEO4J_URI")
     neo4j_user = os.getenv("NEO4J_USER")
     neo4j_password = os.getenv("NEO4J_PASSWORD")
@@ -90,10 +75,11 @@ def get_services() -> Dict:
 
     _chunker = DocumentChunker(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 
+    # Initialize ingestion with Supabase storage only
     _ingestion_service = DocumentIngestion(
-        upload_dir=UPLOAD_DIR,
         supabase_url=SUPABASE_URL,
         supabase_key=SUPABASE_KEY,
+        supabase_bucket=SUPABASE_BUCKET,
         embedding_service=_embedding_service,
         chunker=_chunker,
         graph_store=_graph_store,
@@ -116,16 +102,9 @@ def get_services() -> Dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Auth dependency (placeholder — replace with your real auth)
-# ---------------------------------------------------------------------------
 async def get_current_user() -> Dict:
     return {"user_id": "default_user", "email": "user@example.com"}
 
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
 
 @router.post("/upload")
 async def upload_document(
@@ -133,7 +112,6 @@ async def upload_document(
     file: UploadFile = File(...),
     current_user: Dict = Depends(get_current_user),
 ):
-    """Upload a PDF for indexing. Returns task_id for progress tracking."""
     if not file.filename or not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
@@ -141,19 +119,24 @@ async def upload_document(
 
     task_id = str(uuid.uuid4())
     paper_id = str(uuid.uuid4())
+    storage_path = f"{current_user.get('user_id')}/{paper_id}/{file.filename}"
 
-    # Save to temp file
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     try:
         content = await file.read()
-        temp_file.write(content)
-        temp_file.close()
+        
+        # Validate file size and content
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail="File is empty")
+        
+        if len(content) > 10 * 1024 * 1024:  # 10MB limit
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
 
         _processing_status[task_id] = {
             "status": "queued",
             "progress": 0,
             "filename": file.filename,
             "paper_id": paper_id,
+            "storage_path": storage_path,
             "user_id": current_user.get("user_id"),
             "message": "Queued for processing",
         }
@@ -161,9 +144,10 @@ async def upload_document(
         background_tasks.add_task(
             _process_document_background,
             task_id,
-            temp_file.name,
+            content,
             file.filename,
             paper_id,
+            storage_path,
             current_user.get("user_id"),
             services["ingestion"],
         )
@@ -175,24 +159,21 @@ async def upload_document(
             "message": "Upload successful, processing started",
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
-        import os as _os
-        if _os.path.exists(temp_file.name):
-            _os.unlink(temp_file.name)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
 async def _process_document_background(
     task_id: str,
-    file_path: str,
+    file_bytes: bytes,
     filename: str,
     paper_id: str,
+    storage_path: str,
     user_id: Optional[str],
     ingestion_service: DocumentIngestion,
 ):
-    """Background task — processes and indexes the PDF, then cleans up."""
-    import os as _os
-
     def _progress(status: str, progress: int):
         _processing_status[task_id] = {
             "status": "processing",
@@ -204,12 +185,18 @@ async def _process_document_background(
         }
 
     try:
+        print(f"📄 Processing document: {filename}")
+        print(f"   Paper ID: {paper_id}")
+        print(f"   Storage path: {storage_path}")
+        print(f"   File size: {len(file_bytes)} bytes")
+        
         result = ingestion_service.process_pdf(
-            file_path=file_path,
+            file_bytes=file_bytes,
             filename=filename,
             progress_callback=_progress,
             user_id=user_id,
             paper_id=paper_id,
+            storage_path=storage_path,
         )
 
         if result["success"]:
@@ -220,8 +207,9 @@ async def _process_document_background(
                 "paper_id": paper_id,
                 "user_id": user_id,
                 "chunks_created": result.get("chunks_created", 0),
-                "message": result["message"],
+                "message": result.get("message", "Processing complete"),
             }
+            print(f"✅ Successfully processed {filename}: {result.get('chunks_created', 0)} chunks created")
         else:
             _processing_status[task_id] = {
                 "status": "failed",
@@ -230,8 +218,9 @@ async def _process_document_background(
                 "paper_id": paper_id,
                 "user_id": user_id,
                 "error": result.get("error", "Unknown error"),
-                "message": result["message"],
+                "message": result.get("message", result.get("error", "Processing failed")),
             }
+            print(f"❌ Failed to process {filename}: {result.get('error')}")
 
     except Exception as e:
         _processing_status[task_id] = {
@@ -243,18 +232,14 @@ async def _process_document_background(
             "error": str(e),
             "message": f"Processing failed: {str(e)}",
         }
-
-    finally:
-        if _os.path.exists(file_path):
-            _os.unlink(file_path)
-
-
+        print(f"❌ Error processing {filename}: {e}")
+        import traceback
+        traceback.print_exc()
 @router.get("/status/{task_id}")
 async def get_processing_status(
     task_id: str,
     current_user: Dict = Depends(get_current_user),
 ):
-    """Get the status of a document processing task."""
     if task_id not in _processing_status:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -269,7 +254,6 @@ async def get_processing_status(
 
 @router.get("/resources")
 async def list_resources(current_user: Dict = Depends(get_current_user)):
-    """List all indexed resources for the current user."""
     services = get_services()
     user_id = current_user.get("user_id")
 
@@ -280,6 +264,7 @@ async def list_resources(current_user: Dict = Depends(get_current_user)):
             "filename": p.get("filename"),
             "upload_date": p.get("upload_date"),
             "user_id": p.get("user_id"),
+            "storage_path": p.get("storage_path"),
         }
         for p in papers
     ]
@@ -292,7 +277,6 @@ async def delete_resource(
     paper_id: str,
     current_user: Dict = Depends(get_current_user),
 ):
-    """Delete a resource from the knowledge base."""
     try:
         uuid.UUID(paper_id, version=4)
     except ValueError:
@@ -301,15 +285,17 @@ async def delete_resource(
     services = get_services()
     user_id = current_user.get("user_id")
 
-    # Verify ownership
     papers = services["vector_store"].get_all_papers(user_id=user_id)
-    if not any(p.get("id") == paper_id for p in papers):
+    paper = next((p for p in papers if p.get("id") == paper_id), None)
+    
+    if not paper:
         raise HTTPException(
             status_code=404,
             detail="Paper not found or you don't have permission to delete it",
         )
 
-    result = services["ingestion"].delete_document(paper_id)
+    storage_path = paper.get("storage_path")
+    result = services["ingestion"].delete_document(paper_id, storage_path)
 
     if result.get("success"):
         return {"success": True, "paper_id": paper_id, "message": result.get("message")}
@@ -318,12 +304,12 @@ async def delete_resource(
 
 @router.get("/stats")
 async def get_stats(current_user: Dict = Depends(get_current_user)):
-    """Get knowledge-base statistics for the current user."""
     services = get_services()
     user_id = current_user.get("user_id")
 
     stats = services["vector_store"].get_stats(user_id=user_id)
-    stats["storage_backend"] = "Supabase PostgreSQL"
+    stats["storage_backend"] = "Supabase PostgreSQL + Supabase Storage"
+    stats["storage_bucket"] = SUPABASE_BUCKET
     stats["neo4j_enabled"] = (
         services["graph_store"] is not None and services["graph_store"].enabled
     )
@@ -338,7 +324,6 @@ async def search_documents(
     include_citations: bool = False,
     current_user: Dict = Depends(get_current_user),
 ):
-    """Search the knowledge base."""
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
@@ -365,11 +350,10 @@ async def search_documents(
 
 @router.get("/system/info")
 async def get_system_info():
-    """Return system configuration info."""
     return {
-        "supabase_enabled": USE_SUPABASE,
-        "supabase_url": SUPABASE_URL if USE_SUPABASE else None,
-        "upload_dir": UPLOAD_DIR,
+        "supabase_enabled": True,
+        "supabase_url": SUPABASE_URL,
+        "supabase_bucket": SUPABASE_BUCKET,
         "embedding_dim": EMBEDDING_DIM,
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,

@@ -1,21 +1,11 @@
 // frontend/src/hooks/useApiHealth.js
-
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiService } from '../api/services';
 
-/**
- * Hook for monitoring API health status
- * @param {Object} options - Hook options
- * @param {boolean} options.autoCheck - Whether to auto-check on mount
- * @param {number} options.interval - Auto-check interval in ms (0 to disable)
- * @param {Function} options.onStatusChange - Callback when status changes
- * @param {Function} options.onError - Callback on error
- * @returns {Object} Health status and controls
- */
 export function useApiHealth(options = {}) {
   const {
     autoCheck = true,
-    interval = 30000, // 30 seconds
+    interval = 30000,
     onStatusChange = null,
     onError = null,
   } = options;
@@ -29,19 +19,16 @@ export function useApiHealth(options = {}) {
     retryCount: 0,
   });
 
-  // Use refs to avoid recreating the checkHealth function
   const isCheckingRef = useRef(false);
   const onStatusChangeRef = useRef(onStatusChange);
   const onErrorRef = useRef(onError);
 
-  // Keep refs updated
   useEffect(() => {
     onStatusChangeRef.current = onStatusChange;
     onErrorRef.current = onError;
   }, [onStatusChange, onError]);
 
   const checkHealth = useCallback(async (isAutoCheck = false) => {
-    // Prevent concurrent checks
     if (isCheckingRef.current) {
       console.log('Health check already in progress, skipping...');
       return;
@@ -52,7 +39,6 @@ export function useApiHealth(options = {}) {
     setStatus(prev => ({ 
       ...prev, 
       loading: true,
-      // Only reset error on manual check
       ...(isAutoCheck ? {} : { error: null })
     }));
     
@@ -98,7 +84,6 @@ export function useApiHealth(options = {}) {
     }
   }, [status.retryCount]);
 
-  // Auto-check on mount and interval
   useEffect(() => {
     if (!autoCheck) return;
 
@@ -111,10 +96,8 @@ export function useApiHealth(options = {}) {
       }
     };
 
-    // Run initial check
     initialCheck();
 
-    // Set up interval if specified
     if (interval > 0) {
       intervalId = setInterval(() => {
         if (mounted) {
@@ -130,25 +113,17 @@ export function useApiHealth(options = {}) {
       }
       isCheckingRef.current = false;
     };
-  }, [autoCheck, interval]); // Removed checkHealth from dependencies
+  }, [autoCheck, interval, checkHealth]);
 
   return {
-    // State
     ...status,
-    
-    // Derived state
     isHealthy: status.connected && !status.error,
     isError: !!status.error,
     isLoading: status.loading,
-    
-    // Format last checked time
     lastCheckedTime: status.lastChecked ? new Date(status.lastChecked).toLocaleTimeString() : null,
     lastCheckedDate: status.lastChecked ? new Date(status.lastChecked).toLocaleDateString() : null,
-    
-    // Actions
     checkHealth: () => checkHealth(false),
     retry: () => checkHealth(false),
-    
     reset: () => setStatus({
       loading: false,
       connected: false,
@@ -157,8 +132,6 @@ export function useApiHealth(options = {}) {
       lastChecked: null,
       retryCount: 0,
     }),
-    
-    // Health data helpers
     getUptime: () => status.data?.uptime_seconds || 0,
     getVersion: () => status.data?.version || 'unknown',
     getServerStatus: () => status.data?.mcp_servers || {},

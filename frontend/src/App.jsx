@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import ChatContainer from './Components/ChatContainer';
 import ThreadSidebar from './Components/ThreadSidebar';
+import UploadDocs from './Components/UploadDocs';
 import { useApiHealth } from './hooks/useApiHealth';
 import { useThreads } from './hooks/useThreads';
 import './App.css';
@@ -47,7 +48,6 @@ function App() {
   };
 
   const handleMessageSent = (threadId, message) => {
-    // Update thread preview with the new message
     updateThreadPreview(threadId, message);
   };
 
@@ -93,7 +93,6 @@ function App() {
       <ConnectionStatusBanner />
       
       <div className="app-layout">
-        {/* Sidebar */}
         {sidebarOpen && (
           <ThreadSidebar
             threads={threads}
@@ -105,7 +104,6 @@ function App() {
           />
         )}
 
-        {/* Main Content */}
         <div className="app-main-container">
           <header className="app-header">
             <div className="header-left">
@@ -130,6 +128,13 @@ function App() {
             </div>
             
             <div className="header-actions">
+              <UploadDocs 
+                onUploadSuccess={(result) => {
+                  console.log('PDF uploaded:', result);
+                  alert(`PDF "${result.filename}" uploaded and indexed successfully!`);
+                }}
+              />
+              
               <button
                 className="status-button"
                 onClick={() => setShowConnectionStatus(!showConnectionStatus)}
