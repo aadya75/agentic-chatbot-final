@@ -6,7 +6,7 @@ const isProduction = import.meta.env.PROD;
 const API_CONFIG = {
   BASE_URL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
   API_VERSION: '1.0.0',
-  TIMEOUT: 30000,
+  TIMEOUT: 300000,
   MAX_RETRIES: 3,
   RETRY_DELAY: 1000,
   DEBUG: isDevelopment,

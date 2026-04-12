@@ -249,7 +249,7 @@ class AgentManager:
         now = datetime.utcnow().isoformat()
 
         result = await self.orchestrator.resume(
-            thread_id=thread_id,
+            user_id=thread_id,       # orchestrator keys pending by user_id
             user_response=user_response,
         )
 

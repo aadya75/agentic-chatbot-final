@@ -161,7 +161,7 @@ async def confirm_action(
             )
 
         response = await agent_manager.resume(
-            thread_id=request.thread_id,
+            thread_id=user["id"],   # resume key is always user_id
             user_response=user_response,
             user_id=user["id"],
         )

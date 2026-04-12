@@ -58,7 +58,7 @@ function ChatContainer({ threadId, isBackendConnected, onMessageSent }) {
           message={pendingConfirmation.message}
           threadId={pendingConfirmation.thread_id}
           isLoading={isConfirming}
-          onApprove={() => confirmAction('approve')}
+          onApprove={(jsonString) => confirmAction(jsonString)}
           onReject={() => confirmAction('reject')}
         />
       )}

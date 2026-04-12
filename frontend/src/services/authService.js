@@ -1,4 +1,4 @@
-// frontend/src/services/authService.js  (updated — adds GitHub methods)
+// frontend/src/services/authService.js
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -17,22 +17,34 @@ export const tokenStorage = {
 
 async function authFetch(path, options = {}) {
   const token = tokenStorage.getAccessToken();
+
+  // If no token at all, redirect immediately — don't bother hitting the server
+  if (!token) {
+    tokenStorage.clear();
+    window.location.href = "/login";
+    throw new Error("No access token");
+  }
+
   const headers = {
     "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    Authorization: `Bearer ${token}`,
     ...options.headers,
   };
 
-  const resp = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  let resp = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
+  // Token expired — try to refresh once, then retry the original request
   if (resp.status === 401) {
     const refreshed = await authService.refreshSession();
     if (refreshed) {
       headers.Authorization = `Bearer ${tokenStorage.getAccessToken()}`;
-      return fetch(`${API_BASE}${path}`, { ...options, headers });
+      resp = await fetch(`${API_BASE}${path}`, { ...options, headers });
+    } else {
+      // Refresh failed — session is dead, send to login
+      tokenStorage.clear();
+      window.location.href = "/login";
+      throw new Error("Session expired");
     }
-    tokenStorage.clear();
-    window.location.href = "/login";
   }
 
   return resp;
@@ -65,6 +77,8 @@ export const authService = {
   async logout() {
     try {
       await authFetch("/auth/logout", { method: "POST" });
+    } catch {
+      // ignore — we're logging out anyway
     } finally {
       tokenStorage.clear();
     }
@@ -83,7 +97,9 @@ export const authService = {
       const data = await resp.json();
       tokenStorage.set(data.access_token, data.refresh_token);
       return true;
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   },
 
   async getMe() {
@@ -96,7 +112,7 @@ export const authService = {
     return !!tokenStorage.getAccessToken();
   },
 
-  // ── Google OAuth ─────────────────────────────────────────────────────
+  // ── Google OAuth ────────────────────────────────────────────────────────
 
   async getGoogleConnectUrl() {
     const resp = await authFetch("/auth/google/connect");
@@ -115,7 +131,7 @@ export const authService = {
     return resp.json();
   },
 
-  // ── GitHub OAuth ─────────────────────────────────────────────────────
+  // ── GitHub OAuth ────────────────────────────────────────────────────────
 
   async getGitHubConnectUrl() {
     const resp = await authFetch("/auth/github/connect");
