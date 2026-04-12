@@ -2,14 +2,11 @@
 import { httpClient } from './httpClient';
 import API_CONFIG, { ENDPOINTS } from './config.js';
 
-/**
- * API service methods for interacting with the backend
- */
 export const apiService = {
   // =========================================================================
   // Helper to get auth token from storage
   // =========================================================================
-  
+
   getAuthToken() {
     return localStorage.getItem('access_token') || sessionStorage.getItem('access_token');
   },
@@ -22,18 +19,10 @@ export const apiService = {
         sessionStorage.setItem('access_token', token);
       }
       httpClient.setAuthToken(token);
-      
-      if (API_CONFIG.DEBUG) {
-        console.log('🔑 Auth token saved to storage');
-      }
     } else {
       localStorage.removeItem('access_token');
       sessionStorage.removeItem('access_token');
       httpClient.setAuthToken(null);
-      
-      if (API_CONFIG.DEBUG) {
-        console.log('🔑 Auth token cleared from storage');
-      }
     }
   },
 
@@ -41,29 +30,15 @@ export const apiService = {
   // Health & Status
   // =========================================================================
 
-  /**
-   * Test backend connection and health
-   */
   async testConnection() {
     try {
       const response = await httpClient.get(ENDPOINTS.HEALTH);
-      return {
-        connected: true,
-        data: response,
-        error: null
-      };
+      return { connected: true, data: response, error: null };
     } catch (error) {
-      return {
-        connected: false,
-        data: null,
-        error: error.message || 'Failed to connect to backend'
-      };
+      return { connected: false, data: null, error: error.message || 'Failed to connect' };
     }
   },
 
-  /**
-   * Get detailed backend status
-   */
   async getStatus() {
     return await httpClient.get(ENDPOINTS.STATUS);
   },
@@ -72,116 +47,53 @@ export const apiService = {
   // Authentication Methods
   // =========================================================================
 
-  /**
-   * User signup
-   */
   async signup(userData) {
-    try {
-      const response = await httpClient.post(ENDPOINTS.SIGNUP, {
-        email: userData.email,
-        password: userData.password,
-        full_name: userData.full_name
-      });
-      
-      if (response.access_token) {
-        this.setAuthToken(response.access_token, userData.remember || false);
-      }
-      
-      return {
-        success: true,
-        data: response
-      };
-    } catch (error) {
-      console.error('Signup failed:', error);
-      throw error;
+    const response = await httpClient.post(ENDPOINTS.SIGNUP, {
+      email: userData.email,
+      password: userData.password,
+      full_name: userData.full_name,
+    });
+    if (response.access_token) {
+      this.setAuthToken(response.access_token, userData.remember || false);
     }
+    return { success: true, data: response };
   },
 
-  /**
-   * User login
-   */
   async login(credentials) {
-    try {
-      const response = await httpClient.post(ENDPOINTS.LOGIN, {
-        email: credentials.email,
-        password: credentials.password
-      });
-      
-      if (response.access_token) {
-        this.setAuthToken(response.access_token, credentials.remember || false);
-      }
-      
-      if (API_CONFIG.DEBUG) {
-        console.log('✅ Login successful');
-      }
-      
-      return {
-        success: true,
-        data: response
-      };
-    } catch (error) {
-      console.error('Login failed:', error);
-      throw error;
+    const response = await httpClient.post(ENDPOINTS.LOGIN, {
+      email: credentials.email,
+      password: credentials.password,
+    });
+    if (response.access_token) {
+      this.setAuthToken(response.access_token, credentials.remember || false);
     }
+    return { success: true, data: response };
   },
 
-  /**
-   * User logout
-   */
   async logout() {
     try {
       await httpClient.post(ENDPOINTS.LOGOUT);
+    } finally {
       this.setAuthToken(null);
-      return { success: true };
-    } catch (error) {
-      console.error('Logout failed:', error);
-      // Still clear local token even if server logout fails
-      this.setAuthToken(null);
-      throw error;
     }
+    return { success: true };
   },
 
-  /**
-   * Refresh authentication token
-   */
   async refreshToken() {
-    try {
-      const response = await httpClient.post(ENDPOINTS.REFRESH);
-      if (response.access_token) {
-        this.setAuthToken(response.access_token, true);
-      }
-      return response;
-    } catch (error) {
-      console.error('Token refresh failed:', error);
-      this.setAuthToken(null);
-      throw error;
+    const response = await httpClient.post(ENDPOINTS.REFRESH);
+    if (response.access_token) {
+      this.setAuthToken(response.access_token, true);
     }
+    return response;
   },
 
-  /**
-   * Get current user info
-   */
   async getCurrentUser() {
-    try {
-      const token = this.getAuthToken();
-      if (!token) {
-        throw new Error('No auth token');
-      }
-      
-      // Make sure token is set in httpClient
-      httpClient.setAuthToken(token);
-      
-      const response = await httpClient.get(ENDPOINTS.ME);
-      return response;
-    } catch (error) {
-      console.error('Get current user failed:', error);
-      throw error;
-    }
+    const token = this.getAuthToken();
+    if (!token) throw new Error('No auth token');
+    httpClient.setAuthToken(token);
+    return await httpClient.get(ENDPOINTS.ME);
   },
 
-  /**
-   * Check if user is authenticated
-   */
   async isAuthenticated() {
     try {
       await this.getCurrentUser();
@@ -191,247 +103,163 @@ export const apiService = {
     }
   },
 
-  /**
-   * Initialize auth on app start
-   */
   async initializeAuth() {
     const token = this.getAuthToken();
     if (token) {
-      if (API_CONFIG.DEBUG) {
-        console.log('🔑 Found existing token, initializing auth...');
-      }
-      
       httpClient.setAuthToken(token);
-      
       try {
         const user = await this.getCurrentUser();
-        if (API_CONFIG.DEBUG) {
-          console.log('✅ Auth initialized successfully for user:', user.email);
-        }
         return { authenticated: true, user };
-      } catch (error) {
-        if (API_CONFIG.DEBUG) {
-          console.warn('⚠️ Token validation failed, clearing auth:', error.message);
-        }
-        // Token is invalid or expired
+      } catch {
         this.setAuthToken(null);
         return { authenticated: false, user: null };
       }
     }
-    
-    if (API_CONFIG.DEBUG) {
-      console.log('ℹ️ No existing token found');
-    }
     return { authenticated: false, user: null };
   },
 
-  // frontend/src/api/services.js
-// Add/replace these OAuth methods
-
   // =========================================================================
-  // OAuth Methods - FIXED VERSION
+  // OAuth Methods — FIXED
+  // Step 1: fetch the OAuth URL from backend (with Bearer token)
+  // Step 2: redirect browser to the OAuth provider (GitHub/Google)
   // =========================================================================
 
-  /**
-   * Initiate Google OAuth flow
-   * This should redirect to your backend, which then redirects to Google
-   */
   async initiateGoogleLogin() {
-    try {
-      // Redirect to backend's Google connect endpoint
-      // The backend will handle creating the proper Google OAuth URL
-      const googleAuthUrl = `${API_CONFIG.BASE_URL}${ENDPOINTS.GOOGLE_CONNECT}`;
-      
-      if (API_CONFIG.DEBUG) {
-        console.log('🔐 Redirecting to Google OAuth:', googleAuthUrl);
-      }
-      
-      // Redirect the browser to the backend endpoint
-      window.location.href = googleAuthUrl;
-    } catch (error) {
-      console.error('Failed to initiate Google login:', error);
-      throw error;
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+
+    // Fetch the Google OAuth URL from our backend (requires auth)
+    const response = await fetch(
+      `${API_CONFIG.BASE_URL}${ENDPOINTS.GOOGLE_CONNECT}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to get Google connect URL');
     }
+
+    const { url } = await response.json();
+    // Now redirect browser to Google (no auth header needed — it's Google's page)
+    window.location.href = url;
   },
 
-  /**
-   * Initiate GitHub OAuth flow
-   * This should redirect to your backend, which then redirects to GitHub
-   */
   async initiateGithubLogin() {
-    try {
-      // Redirect to backend's GitHub connect endpoint
-      // The backend will handle creating the proper GitHub OAuth URL
-      const githubAuthUrl = `${API_CONFIG.BASE_URL}${ENDPOINTS.GITHUB_CONNECT}`;
-      
-      if (API_CONFIG.DEBUG) {
-        console.log('🔐 Redirecting to GitHub OAuth:', githubAuthUrl);
-      }
-      
-      // Redirect the browser to the backend endpoint
-      window.location.href = githubAuthUrl;
-    } catch (error) {
-      console.error('Failed to initiate GitHub login:', error);
-      throw error;
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+
+    // Fetch the GitHub OAuth URL from our backend (requires auth)
+    const response = await fetch(
+      `${API_CONFIG.BASE_URL}${ENDPOINTS.GITHUB_CONNECT}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to get GitHub connect URL');
     }
+
+    const { url } = await response.json();
+    // Now redirect browser to GitHub (no auth header needed — it's GitHub's page)
+    window.location.href = url;
   },
 
-  /**
-   * Handle OAuth callback (to be called on your callback page)
-   * This is called after Google/GitHub redirect back to your frontend
-   */
+  async disconnectGithub() {
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+
+    const response = await fetch(
+      `${API_CONFIG.BASE_URL}${ENDPOINTS.GITHUB_DISCONNECT}`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to disconnect GitHub');
+    }
+
+    return response.json();
+  },
+
+  async disconnectGoogle() {
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+
+    const response = await fetch(
+      `${API_CONFIG.BASE_URL}${ENDPOINTS.GOOGLE_DISCONNECT}`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to disconnect Google');
+    }
+
+    return response.json();
+  },
+
   async handleOAuthCallback() {
-    // Get token from URL parameters
     const urlParams = new URLSearchParams(window.location.search);
     const token = urlParams.get('token');
     const error = urlParams.get('error');
-    
-    if (error) {
-      console.error('OAuth error:', error);
-      return { success: false, error };
-    }
-    
+
+    if (error) return { success: false, error };
+
     if (token) {
-      // Store the token
       this.setAuthToken(token, true);
-      
-      if (API_CONFIG.DEBUG) {
-        console.log('✅ OAuth login successful');
-      }
-      
-      // Clean up URL (remove token from query string)
       window.history.replaceState({}, document.title, window.location.pathname);
-      
       return { success: true, token };
     }
-    
+
     return { success: false, error: 'No token received' };
   },
 
-  /**
-   * Get Google OAuth URL (DEPRECATED - use initiateGoogleLogin instead)
-   * This was causing the direct GitHub issue
-   */
-  getGoogleAuthUrl() {
-    console.warn('getGoogleAuthUrl is deprecated. Use initiateGoogleLogin() instead');
-    return `${API_CONFIG.BASE_URL}${ENDPOINTS.GOOGLE_CONNECT}`;
-  },
-
-  /**
-   * Get GitHub OAuth URL (DEPRECATED - use initiateGithubLogin instead)
-   * This was causing the direct GitHub issue
-   */
-  getGithubAuthUrl() {
-    console.warn('getGithubAuthUrl is deprecated. Use initiateGithubLogin() instead');
-    return `${API_CONFIG.BASE_URL}${ENDPOINTS.GITHUB_CONNECT}`;
-  },
-
   // =========================================================================
-  // Thread/Chat Management
+  // Thread / Chat
   // =========================================================================
 
-  /**
-   * Create a new conversation thread
-   */
   async createThread() {
-    try {
-      const token = this.getAuthToken();
-      if (!token) {
-        throw new Error('Not authenticated');
-      }
-      
-      httpClient.setAuthToken(token);
-      
-      const response = await httpClient.post(ENDPOINTS.CREATE_THREAD);
-      return {
-        success: true,
-        threadId: response.thread_id,
-        data: response
-      };
-    } catch (error) {
-      console.error('Failed to create thread:', error);
-      throw error;
-    }
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    httpClient.setAuthToken(token);
+    const response = await httpClient.post(ENDPOINTS.CREATE_THREAD);
+    return { success: true, threadId: response.thread_id, data: response };
   },
 
-  /**
-   * Delete a thread
-   */
   async deleteThread(threadId) {
-    try {
-      const token = this.getAuthToken();
-      if (!token) {
-        throw new Error('Not authenticated');
-      }
-      
-      httpClient.setAuthToken(token);
-      
-      return await httpClient.delete(ENDPOINTS.DELETE_THREAD(threadId));
-    } catch (error) {
-      console.error('Failed to delete thread:', error);
-      throw error;
-    }
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    httpClient.setAuthToken(token);
+    return await httpClient.delete(ENDPOINTS.DELETE_THREAD(threadId));
   },
 
-  /**
-   * List all threads
-   * NOTE: This endpoint doesn't exist in your backend
-   */
   async listThreads() {
     console.warn('listThreads endpoint not implemented in backend');
     return [];
   },
 
-  /**
-   * Send a message
-   */
   async sendMessage(threadId, message, options = {}) {
-    try {
-      const token = this.getAuthToken();
-      if (!token) {
-        throw new Error('Not authenticated');
-      }
-      
-      httpClient.setAuthToken(token);
-      
-      if (API_CONFIG.DEBUG) {
-        console.log('📨 Sending message:', { threadId, message });
-      }
-      
-      const response = await httpClient.post(ENDPOINTS.SEND_MESSAGE, {
-        message: message,
-        thread_id: threadId,
-        user_id: options.userId || null
-      });
-      
-      if (API_CONFIG.DEBUG) {
-        console.log('📬 Received response:', response);
-      }
-      
-      return {
-        success: true,
-        data: response
-      };
-    } catch (error) {
-      console.error('❌ Failed to send message:', error);
-      throw error;
-    }
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    httpClient.setAuthToken(token);
+    const response = await httpClient.post(ENDPOINTS.SEND_MESSAGE, {
+      message,
+      thread_id: threadId,
+      user_id: options.userId || null,
+    });
+    return { success: true, data: response };
   },
 
-  /**
-   * Stream a message response (Server-Sent Events)
-   */
   async streamMessage(threadId, message, onChunk, onComplete, onError) {
     try {
-      const token = this.getAuthToken();
-      if (!token) {
-        throw new Error('Not authenticated');
-      }
-      
-      // For now, fall back to regular message
       const result = await this.sendMessage(threadId, message);
       if (result.success) {
-        // Simulate streaming by sending the complete response as one chunk
         onChunk?.({ type: 'token', content: result.data.message });
         onComplete?.();
       }
@@ -440,91 +268,37 @@ export const apiService = {
     }
   },
 
-  /**
-   * Get all messages from a thread
-   */
   async getMessages(threadId) {
-    try {
-      const token = this.getAuthToken();
-      if (!token) {
-        throw new Error('Not authenticated');
-      }
-      
-      httpClient.setAuthToken(token);
-      
-      const response = await httpClient.get(ENDPOINTS.GET_THREAD_MESSAGES(threadId));
-      return response.messages || response;
-    } catch (error) {
-      console.error('Failed to get messages:', error);
-      throw error;
-    }
-  },
-
-  /**
-   * Clear all messages from a thread
-   * NOTE: This endpoint doesn't exist in your backend
-   */
-  async clearMessages(threadId) {
-    console.warn('clearMessages endpoint not implemented in backend');
-    throw new Error('Not implemented');
-  },
-
-  /**
-   * Get available tools
-   */
-  async getTools() {
-    try {
-      return await httpClient.get('/api/tools');
-    } catch (error) {
-      console.warn('getTools endpoint not available');
-      return { tools: [] };
-    }
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    httpClient.setAuthToken(token);
+    const response = await httpClient.get(ENDPOINTS.GET_THREAD_MESSAGES(threadId));
+    return response.messages || response;
   },
 
   // =========================================================================
-  // Knowledge Base / Document Management
+  // Knowledge Base
   // =========================================================================
 
-  /**
-   * Upload a PDF document to the knowledge base
-   */
   async uploadDocument(file) {
     const token = this.getAuthToken();
-    if (!token) {
-      throw new Error('Not authenticated');
-    }
-    
+    if (!token) throw new Error('Not authenticated');
     const formData = new FormData();
     formData.append('file', file);
-    
-    const url = `${httpClient.baseURL}${ENDPOINTS.KNOWLEDGE_UPLOAD}`;
-    
-    const response = await fetch(url, {
+    const response = await fetch(`${httpClient.baseURL}${ENDPOINTS.KNOWLEDGE_UPLOAD}`, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`
-      },
+      headers: { Authorization: `Bearer ${token}` },
       body: formData,
-      // Don't set Content-Type header - let browser set it with boundary
     });
-    
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(error.detail || error.message || 'Upload failed');
+      throw new Error(error.detail || 'Upload failed');
     }
-    
     return response.json();
   },
 
-  /**
-   * Upload multiple documents
-   */
   async uploadMultipleDocuments(files) {
-    const results = {
-      success: [],
-      failed: []
-    };
-    
+    const results = { success: [], failed: [] };
     for (const file of files) {
       try {
         const result = await this.uploadDocument(file);
@@ -533,125 +307,69 @@ export const apiService = {
         results.failed.push({ file: file.name, error: error.message });
       }
     }
-    
     return results;
   },
 
-  /**
-   * Check the processing status of an uploaded document
-   */
   async checkUploadStatus(taskId) {
     const token = this.getAuthToken();
-    if (!token) {
-      throw new Error('Not authenticated');
-    }
-    
+    if (!token) throw new Error('Not authenticated');
     httpClient.setAuthToken(token);
     return await httpClient.get(ENDPOINTS.KNOWLEDGE_STATUS(taskId));
   },
 
-  /**
-   * Poll for upload status until complete
-   */
   async pollUploadStatus(taskId, interval = 2000, maxAttempts = 60) {
     let attempts = 0;
-    
     while (attempts < maxAttempts) {
       try {
         const status = await this.checkUploadStatus(taskId);
-        
-        if (status.status === 'completed') {
-          return { success: true, data: status };
-        } else if (status.status === 'failed') {
-          return { success: false, error: status.error || 'Processing failed' };
-        }
-        
-        if (API_CONFIG.DEBUG) {
-          console.log(`Polling status for ${taskId}: ${status.status} (${status.progress}%)`);
-        }
-        
+        if (status.status === 'completed') return { success: true, data: status };
+        if (status.status === 'failed') return { success: false, error: status.error || 'Processing failed' };
         await new Promise(resolve => setTimeout(resolve, interval));
         attempts++;
-      } catch (error) {
-        console.error('Error polling status:', error);
+      } catch {
         await new Promise(resolve => setTimeout(resolve, interval));
         attempts++;
       }
     }
-    
     return { success: false, error: 'Processing timeout' };
   },
 
-  /**
-   * List all resources/documents in the knowledge base
-   */
   async listResources() {
     const token = this.getAuthToken();
-    if (!token) {
-      throw new Error('Not authenticated');
-    }
-    
+    if (!token) throw new Error('Not authenticated');
     httpClient.setAuthToken(token);
     return await httpClient.get(ENDPOINTS.KNOWLEDGE_LIST);
   },
 
-  /**
-   * Delete a resource/document from the knowledge base
-   */
   async deleteResource(paperId) {
     const token = this.getAuthToken();
-    if (!token) {
-      throw new Error('Not authenticated');
-    }
-    
+    if (!token) throw new Error('Not authenticated');
     httpClient.setAuthToken(token);
     return await httpClient.delete(ENDPOINTS.KNOWLEDGE_DELETE(paperId));
   },
 
-  /**
-   * Search the knowledge base for relevant documents
-   */
   async searchDocuments(query, topK = 5, includeCitations = false) {
     const token = this.getAuthToken();
-    if (!token) {
-      throw new Error('Not authenticated');
-    }
-    
+    if (!token) throw new Error('Not authenticated');
     httpClient.setAuthToken(token);
     return await httpClient.post(ENDPOINTS.KNOWLEDGE_SEARCH, {
-      query: query,
+      query,
       top_k: topK,
-      include_citations: includeCitations
+      include_citations: includeCitations,
     });
   },
 
-  /**
-   * Get knowledge base statistics
-   */
   async getKnowledgeStats() {
     const token = this.getAuthToken();
-    if (!token) {
-      throw new Error('Not authenticated');
-    }
-    
+    if (!token) throw new Error('Not authenticated');
     httpClient.setAuthToken(token);
     return await httpClient.get(ENDPOINTS.KNOWLEDGE_STATS);
   },
 
-  /**
-   * Get system information about the knowledge base
-   */
   async getKnowledgeSystemInfo() {
     return await httpClient.get(ENDPOINTS.KNOWLEDGE_INFO);
   },
 
-  // =========================================================================
-  // Helper methods
-  // =========================================================================
-
-  /**
-   * Get a formatted list of resources with metadata
-   */
   async getFormattedResources() {
     try {
       const result = await this.listResources();
@@ -662,132 +380,43 @@ export const apiService = {
         userId: resource.user_id,
         type: 'pdf',
         status: resource.status || 'completed',
-        ...resource
+        ...resource,
       }));
-    } catch (error) {
-      console.error('Failed to get formatted resources:', error);
+    } catch {
       return [];
     }
   },
 
-  /**
-   * Bulk delete multiple resources
-   */
   async bulkDeleteResources(paperIds) {
-    const results = {
-      success: [],
-      failed: []
-    };
-    
-    const deletePromises = paperIds.map(async (paperId) => {
-      try {
+    const results = { success: [], failed: [] };
+    const settled = await Promise.allSettled(
+      paperIds.map(async (paperId) => {
         await this.deleteResource(paperId);
-        return { paperId, success: true };
-      } catch (error) {
-        return { paperId, success: false, error: error.message };
-      }
-    });
-    
-    const settledResults = await Promise.allSettled(deletePromises);
-    
-    for (const result of settledResults) {
+        return paperId;
+      })
+    );
+    for (const result of settled) {
       if (result.status === 'fulfilled') {
-        if (result.value.success) {
-          results.success.push(result.value.paperId);
-        } else {
-          results.failed.push({ 
-            paperId: result.value.paperId, 
-            error: result.value.error 
-          });
-        }
+        results.success.push(result.value);
+      } else {
+        results.failed.push({ paperId: result.reason?.paperId, error: result.reason?.message });
       }
     }
-    
     return results;
   },
 
-  /**
-   * Enhanced search with additional metadata
-   */
-  async enhancedSearch(query, options = {}) {
-    const { topK = 5, includeCitations = true, minRelevanceScore = 0 } = options;
-    
-    const result = await this.searchDocuments(query, topK, includeCitations);
-    
-    if (minRelevanceScore > 0 && result.chunks) {
-      result.chunks = result.chunks.filter(
-        chunk => (chunk.relevance_score || 0) >= minRelevanceScore
-      );
-      result.num_results = result.chunks.length;
-    }
-    
-    return result;
-  },
-
-  /**
-   * Get document by ID with additional metadata
-   */
-  async getDocumentById(paperId) {
-    try {
-      const resources = await this.listResources();
-      const resource = resources.resources.find(r => r.paper_id === paperId);
-      
-      if (!resource) {
-        throw new Error('Document not found');
-      }
-      
-      return {
-        found: true,
-        document: resource
-      };
-    } catch (error) {
-      console.error('Failed to get document:', error);
-      return {
-        found: false,
-        error: error.message
-      };
-    }
-  },
-
-  /**
-   * Validate file before upload
-   */
   validateFile(file) {
-    const maxSize = 10 * 1024 * 1024; // 10MB
-    const allowedTypes = ['application/pdf'];
-    
-    if (!allowedTypes.includes(file.type)) {
-      return {
-        valid: false,
-        error: 'Only PDF files are allowed'
-      };
-    }
-    
-    if (file.size > maxSize) {
-      return {
-        valid: false,
-        error: 'File size must be less than 10MB'
-      };
-    }
-    
-    return {
-      valid: true,
-      error: null
-    };
-  }
+    const maxSize = 10 * 1024 * 1024;
+    if (file.type !== 'application/pdf') return { valid: false, error: 'Only PDF files are allowed' };
+    if (file.size > maxSize) return { valid: false, error: 'File size must be less than 10MB' };
+    return { valid: true, error: null };
+  },
 };
 
-// Setup global auth error handler
 if (typeof window !== 'undefined') {
-  window.addEventListener('auth:unauthorized', (event) => {
-    if (API_CONFIG.DEBUG) {
-      console.warn('🔒 Authentication error detected:', event.detail);
-    }
-    // Clear token and dispatch logout event
+  window.addEventListener('auth:unauthorized', () => {
     apiService.setAuthToken(null);
-    window.dispatchEvent(new CustomEvent('app:logout', { 
-      detail: { reason: 'unauthorized', message: event.detail?.message }
-    }));
+    window.dispatchEvent(new CustomEvent('app:logout', { detail: { reason: 'unauthorized' } }));
   });
 }
 
