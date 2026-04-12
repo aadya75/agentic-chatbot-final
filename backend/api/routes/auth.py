@@ -202,6 +202,3 @@ async def github_disconnect(user: CurrentUser):
     await disconnect_github(user["id"])
     return {"message": "GitHub account disconnected"}
 
-
-# needed for get_me
-import asyncio

@@ -246,13 +246,13 @@ class OrchestratorState(TypedDict):
 # ============================================================================
 
 _model = os.getenv("ORCHESTRATOR_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-llm = ChatGroq(model=_model, temperature=0.7, api_key=os.getenv("GROQ_API_KEY"))
+llm = ChatGroq(model=_model, temperature=0.7, api_key=os.getenv("GROQ_API_KEY"), timeout=30, max_retries=1)
 
 _planning_model = os.getenv("PLANNING_MODEL", "llama-3.3-70b-versatile")
-planning_llm = ChatGroq(model=_planning_model, temperature=0.0, api_key=os.getenv("GROQ_API_KEY"))
+planning_llm = ChatGroq(model=_planning_model, temperature=0.0, api_key=os.getenv("GROQ_API_KEY"), timeout=30, max_retries=1)
 
-_worker_model = os.getenv("WORKER_MODEL", "llama-3.1-8b-instant")
-worker_llm = ChatGroq(model=_worker_model, temperature=0.1, api_key=os.getenv("GROQ_API_KEY"))
+_worker_model = os.getenv("WORKER_MODEL", "llama-3.3-70b-versatile")
+worker_llm = ChatGroq(model=_worker_model, temperature=0.1, api_key=os.getenv("GROQ_API_KEY"), timeout=60, max_retries=1)
 
 
 _wiki_tool = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
@@ -791,12 +791,18 @@ async def google_workspace_worker_node(payload: dict) -> dict:
         gmail_kw = {"gmail", "email", "message", "inbox", "send", "draft", "thread", "label"}
         cal_kw   = {"calendar", "event", "schedule", "meeting", "attendee"}
 
+        # In google_workspace_worker_node, replace the filter section:
+
         if google_service == "gmail":
             filtered = [t for t in all_tools
                         if any(kw in t.name.lower() for kw in gmail_kw)]
         elif google_service == "calendar":
-            filtered = [t for t in all_tools
-                        if any(kw in t.name.lower() for kw in cal_kw)]
+            # Use exact names — keyword match accidentally includes create_calendar
+            CALENDAR_TOOLS = {
+                "list_calendars", "get_events", "manage_event",
+                "create_event", "modify_event", "delete_event"
+            }
+            filtered = [t for t in all_tools if t.name in CALENDAR_TOOLS]
         else:
             filtered = all_tools
 
@@ -822,16 +828,70 @@ Tool contracts:
 - get_gmail_attachment_content(message_id, attachment_id) -> retrieves attachment.
 
 Present email summaries as: Subject | From | Date | Key points (2 lines max each).
+
+EXECUTION RULES:
+- Call each tool ONCE only. Never repeat a tool call.
+- After a successful tool response (even 202 Accepted), consider the action DONE.
+- Do NOT retry if you receive a confirmation or an ID in the response.
+- Respond to the user immediately after one successful tool call.
 """
         elif google_service == "calendar":
-            system_content = """You are a Google Calendar assistant. Use the available Calendar tools.
 
-Tool contracts:
-- List/search tools -> return event objects: id, summary, start, end, attendees, description.
-- Create tools -> require: summary (title), start datetime (ISO), end datetime (ISO).
-- Update tools -> require event id. Search/list first to get the id, then update.
+          
+          
+          
+          
+          system_content = """You are a Google Calendar assistant. Use ONLY these exact tools:
+ 
+AVAILABLE TOOLS:
+1. list_calendars()
+   - Lists all calendars. Call this first if you need a calendar_id other than "primary".
+   - Returns: list of calendars with id, summary fields.
+ 
+2. get_events(calendar_id, time_min, time_max, max_results)
+   - Retrieves events from a calendar.
+   - calendar_id: use "primary" unless user specifies another calendar
+   - time_min / time_max: ISO 8601 format REQUIRED e.g. "2026-04-12T00:00:00Z"
+   - max_results: integer e.g. 10
+   - FORBIDDEN parameters: do NOT include "detailed", "single_events", or any other param
+ 
+3. manage_event(calendar_id, summary, start_time, end_time, description, location, attendees, event_id)
+   - USE THIS to CREATE a new event (omit event_id)
+   - USE THIS to UPDATE an existing event (include event_id)
+   - calendar_id: use "primary" unless user specifies
+   - start_time / end_time: ISO 8601 format REQUIRED e.g. "2026-04-12T10:00:00Z"
+   - summary: event title (string)
+   - description: optional event description (string)
+   - location: optional location (string)
+   - attendees: optional list of email strings e.g. ["user@gmail.com"]
+   - event_id: only for updates, get it from get_events first
+ 
+4. create_calendar(summary)
+   - Creates a BRAND NEW separate calendar (like "Work" or "Personal")
+   - DO NOT use this to create events — use manage_event instead
+   - Only call this if the user explicitly says "create a new calendar"
+ 
+CRITICAL RULES:
+- To create an EVENT → use manage_event (NOT create_calendar)
+- To update an EVENT → use manage_event with event_id
+- Never pass Python booleans (True/False) — use JSON (true/false)
+- Never pass undefined parameters to any tool
+- If time is not specified, use a reasonable default (e.g. 1 hour from now)
+- Always use "primary" as calendar_id unless user specifies a different calendar name
+ 
+WORKFLOW FOR CREATING AN EVENT:
+1. Call manage_event directly with summary, start_time, end_time, calendar_id="primary"
+2. Do NOT call list_calendars first unless user mentions a specific calendar name
+ 
+WORKFLOW FOR READING EVENTS:
+1. Call get_events with calendar_id="primary", time_min, time_max, max_results=10
+2. Do NOT include any extra parameters beyond these four
 
-Present schedules in chronological order: Date | Time | Event title | Key details.
+EXECUTION RULES:
+- Call each tool ONCE only. Never repeat a tool call.
+- After a successful tool response (even 202 Accepted), consider the action DONE.
+- Do NOT retry if you receive a confirmation or an ID in the response.
+- Respond to the user immediately after one successful tool call.
 """
         else:
             system_content = (
@@ -922,16 +982,19 @@ def fanout_to_workers(state: OrchestratorState):
         }
         if context:
             payload["context"] = context
-
-        if task.worker_type == "github":
+ 
+        wtype = task.worker_type.lower()
+ 
+        if wtype == "github":
             sends.append(Send("github_worker", payload))
         elif task.worker_type in ("gmail", "calendar") or \
              task.worker_type.startswith("google_") or task.google_service:
             sends.append(Send("google_workspace_worker", payload))
+ 
         else:
             sends.append(Send("conversational_worker", payload))
+ 
     return sends
-
 
 # ============================================================================
 # AGGREGATOR
