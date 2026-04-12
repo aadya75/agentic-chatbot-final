@@ -422,6 +422,11 @@ def planning_agent_node(state: OrchestratorState) -> dict:
 
 
 def route_after_planning(state: OrchestratorState) -> str:
+    """
+    Routes to the correct context node.
+    Uses explicit `is None` check — `plan.context_type or ""` would turn
+    None into "" which falls through to execute_tasks, skipping all context nodes.
+    """
     plan = state.get("plan")
     if not plan or not plan.needs_context or plan.context_type is None:
         return "execute_tasks"
@@ -706,6 +711,7 @@ async def github_worker_node(payload: dict) -> dict:
         agent = create_agent(worker_llm, filtered)
 
         prompt = (
+            "Github username: nainaamodii\n"+
             f"GitHub Task: {task_data.get('description', '')}\n"
             + (f"\nContext:\n{context[:800]}\n" if context else "")
             + f"\nQuery: {payload.get('user_query', '')}\n\n"
@@ -995,6 +1001,10 @@ def fanout_to_workers(state: OrchestratorState):
             sends.append(Send("conversational_worker", payload))
  
     return sends
+
+# ============================================================================
+# AGGREGATOR
+# ============================================================================
 
 # ============================================================================
 # AGGREGATOR
@@ -1309,7 +1319,6 @@ class SmartOrchestrator:
             "final_response":         "",
             "hitl_approved_payload":  None,
         }
-
         try:
             final = await self.graph.ainvoke(state, config=config)
             interrupt_resp = self._extract_interrupt(final, user_id, thread_id)
