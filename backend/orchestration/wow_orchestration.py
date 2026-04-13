@@ -246,13 +246,13 @@ class OrchestratorState(TypedDict):
 # ============================================================================
 
 _model = os.getenv("ORCHESTRATOR_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-llm = ChatGroq(model=_model, temperature=0.7, api_key=os.getenv("GROQ_API_KEY"), timeout=30, max_retries=1)
+llm = ChatGroq(model=_model, temperature=0.7, api_key=os.getenv("GROQ_API_KEY"))
 
 _planning_model = os.getenv("PLANNING_MODEL", "llama-3.3-70b-versatile")
-planning_llm = ChatGroq(model=_planning_model, temperature=0.0, api_key=os.getenv("GROQ_API_KEY"), timeout=30, max_retries=1)
+planning_llm = ChatGroq(model=_planning_model, temperature=0.0, api_key=os.getenv("GROQ_API_KEY"))
 
-_worker_model = os.getenv("WORKER_MODEL", "llama-3.3-70b-versatile")
-worker_llm = ChatGroq(model=_worker_model, temperature=0.1, api_key=os.getenv("GROQ_API_KEY"), timeout=60, max_retries=1)
+_worker_model = os.getenv("WORKER_MODEL", "llama-3.1-8b-instant")
+worker_llm = ChatGroq(model=_worker_model, temperature=0.1, api_key=os.getenv("GROQ_API_KEY"))
 
 
 _wiki_tool = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
@@ -797,18 +797,12 @@ async def google_workspace_worker_node(payload: dict) -> dict:
         gmail_kw = {"gmail", "email", "message", "inbox", "send", "draft", "thread", "label"}
         cal_kw   = {"calendar", "event", "schedule", "meeting", "attendee"}
 
-        # In google_workspace_worker_node, replace the filter section:
-
         if google_service == "gmail":
             filtered = [t for t in all_tools
                         if any(kw in t.name.lower() for kw in gmail_kw)]
         elif google_service == "calendar":
-            # Use exact names — keyword match accidentally includes create_calendar
-            CALENDAR_TOOLS = {
-                "list_calendars", "get_events", "manage_event",
-                "create_event", "modify_event", "delete_event"
-            }
-            filtered = [t for t in all_tools if t.name in CALENDAR_TOOLS]
+            filtered = [t for t in all_tools
+                        if any(kw in t.name.lower() for kw in cal_kw)]
         else:
             filtered = all_tools
 
@@ -1001,6 +995,10 @@ def fanout_to_workers(state: OrchestratorState):
             sends.append(Send("conversational_worker", payload))
  
     return sends
+
+# ============================================================================
+# AGGREGATOR
+# ============================================================================
 
 # ============================================================================
 # AGGREGATOR
@@ -1292,6 +1290,32 @@ class SmartOrchestrator:
                 "club_search_used": bool(final.get("club_context")),
                 "workers_used":     list({r.worker_type for r in results}),
             },
+        }
+
+    async def process(self, user_query: str,
+                      conversation_history: List[str] = None,
+                      user_id: str = "") -> dict:
+        if not user_query or not user_query.strip():
+            return {"success": False, "interrupted": False,
+                    "response": "Empty query.", "metadata": {}}
+
+        # ── FIX: unique thread_id per query prevents stale checkpoint replay ──
+        thread_id = f"{user_id}_{uuid.uuid4().hex[:8]}" if user_id else uuid.uuid4().hex
+        config    = self._make_config(thread_id)
+
+        state: OrchestratorState = {
+            "user_id":                user_id,
+            "user_query":             user_query.strip(),
+            "conversation_history":   conversation_history or [],
+            "plan":                   None,
+            "web_context":            [],
+            "rag_context":            [],
+            "club_context":           [],
+            "combined_context":       "",
+            "tasks":                  [],
+            "results":                [],
+            "final_response":         "",
+            "hitl_approved_payload":  None,
         }
 
     async def process(self, user_query: str,

@@ -257,6 +257,49 @@ export const apiService = {
   },
 
   /**
+   * Send a message
+   */
+  async sendMessage(threadId, message, options = {}) {
+    try {
+      const token = this.getAuthToken();
+      if (!token) {
+        throw new Error('Not authenticated');
+      }
+      
+      httpClient.setAuthToken(token);
+      
+      if (API_CONFIG.DEBUG) {
+        console.log('📨 Sending message:', { threadId, message });
+      }
+      
+      const response = await httpClient.post(ENDPOINTS.SEND_MESSAGE, {
+        message: message,
+        thread_id: threadId,
+        user_id: options.userId || null
+      });
+      
+      if (API_CONFIG.DEBUG) {
+        console.log('📬 Received response:', response);
+      }
+      
+      return {
+        success: true,
+        data: response
+      };
+    } catch (error) {
+      console.error('❌ Failed to send message:', error);
+      throw error;
+    }
+
+    const response = await httpClient.post('/api/message/confirm', {
+      thread_id: threadId,
+      response: userResp,
+    });
+
+    return { success: true, data: response };
+  },
+
+  /**
    * Confirm (approve or reject) a pending HITL action.
    * Called after sendMessage returns interrupted=true.
    *
@@ -286,8 +329,15 @@ export const apiService = {
    */
   async streamMessage(threadId, message, onChunk, onComplete, onError) {
     try {
+      const token = this.getAuthToken();
+      if (!token) {
+        throw new Error('Not authenticated');
+      }
+      
+      // For now, fall back to regular message
       const result = await this.sendMessage(threadId, message);
       if (result.success) {
+        // Simulate streaming by sending the complete response as one chunk
         onChunk?.({ type: 'token', content: result.data.message });
         onComplete?.();
       }
