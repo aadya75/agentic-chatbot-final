@@ -423,6 +423,11 @@ def planning_agent_node(state: OrchestratorState) -> dict:
 
 
 def route_after_planning(state: OrchestratorState) -> str:
+    """
+    Routes to the correct context node.
+    Uses explicit `is None` check — `plan.context_type or ""` would turn
+    None into "" which falls through to execute_tasks, skipping all context nodes.
+    """
     plan = state.get("plan")
     if not plan or not plan.needs_context or plan.context_type is None:
         return "execute_tasks"
@@ -707,6 +712,7 @@ async def github_worker_node(payload: dict) -> dict:
         agent = create_agent(worker_llm, filtered)
 
         prompt = (
+            "Github username: nainaamodii\n"+
             f"GitHub Task: {task_data.get('description', '')}\n"
             + (f"\nContext:\n{context[:800]}\n" if context else "")
             + f"\nQuery: {payload.get('user_query', '')}\n\n"
@@ -823,8 +829,70 @@ Tool contracts:
 - get_gmail_attachment_content(message_id, attachment_id) -> retrieves attachment.
 
 Present email summaries as: Subject | From | Date | Key points (2 lines max each).
+
+EXECUTION RULES:
+- Call each tool ONCE only. Never repeat a tool call.
+- After a successful tool response (even 202 Accepted), consider the action DONE.
+- Do NOT retry if you receive a confirmation or an ID in the response.
+- Respond to the user immediately after one successful tool call.
 """
         elif google_service == "calendar":
+
+          
+          
+          
+          
+          system_content = """You are a Google Calendar assistant. Use ONLY these exact tools:
+ 
+AVAILABLE TOOLS:
+1. list_calendars()
+   - Lists all calendars. Call this first if you need a calendar_id other than "primary".
+   - Returns: list of calendars with id, summary fields.
+ 
+2. get_events(calendar_id, time_min, time_max, max_results)
+   - Retrieves events from a calendar.
+   - calendar_id: use "primary" unless user specifies another calendar
+   - time_min / time_max: ISO 8601 format REQUIRED e.g. "2026-04-12T00:00:00Z"
+   - max_results: integer e.g. 10
+   - FORBIDDEN parameters: do NOT include "detailed", "single_events", or any other param
+ 
+3. manage_event(calendar_id, summary, start_time, end_time, description, location, attendees, event_id)
+   - USE THIS to CREATE a new event (omit event_id)
+   - USE THIS to UPDATE an existing event (include event_id)
+   - calendar_id: use "primary" unless user specifies
+   - start_time / end_time: ISO 8601 format REQUIRED e.g. "2026-04-12T10:00:00Z"
+   - summary: event title (string)
+   - description: optional event description (string)
+   - location: optional location (string)
+   - attendees: optional list of email strings e.g. ["user@gmail.com"]
+   - event_id: only for updates, get it from get_events first
+ 
+4. create_calendar(summary)
+   - Creates a BRAND NEW separate calendar (like "Work" or "Personal")
+   - DO NOT use this to create events — use manage_event instead
+   - Only call this if the user explicitly says "create a new calendar"
+ 
+CRITICAL RULES:
+- To create an EVENT → use manage_event (NOT create_calendar)
+- To update an EVENT → use manage_event with event_id
+- Never pass Python booleans (True/False) — use JSON (true/false)
+- Never pass undefined parameters to any tool
+- If time is not specified, use a reasonable default (e.g. 1 hour from now)
+- Always use "primary" as calendar_id unless user specifies a different calendar name
+ 
+WORKFLOW FOR CREATING AN EVENT:
+1. Call manage_event directly with summary, start_time, end_time, calendar_id="primary"
+2. Do NOT call list_calendars first unless user mentions a specific calendar name
+ 
+WORKFLOW FOR READING EVENTS:
+1. Call get_events with calendar_id="primary", time_min, time_max, max_results=10
+2. Do NOT include any extra parameters beyond these four
+
+EXECUTION RULES:
+- Call each tool ONCE only. Never repeat a tool call.
+- After a successful tool response (even 202 Accepted), consider the action DONE.
+- Do NOT retry if you receive a confirmation or an ID in the response.
+- Respond to the user immediately after one successful tool call.
             system_content = """You are a Google Calendar assistant. Use the available Calendar tools.
 
 Tool contracts:
@@ -925,14 +993,18 @@ def fanout_to_workers(state: OrchestratorState):
         }
         if context:
             payload["context"] = context
-
-        if task.worker_type == "github":
+ 
+        wtype = task.worker_type.lower()
+ 
+        if wtype == "github":
             sends.append(Send("github_worker", payload))
         elif task.worker_type in ("gmail", "calendar") or \
              task.worker_type.startswith("google_") or task.google_service:
             sends.append(Send("google_workspace_worker", payload))
+ 
         else:
             sends.append(Send("conversational_worker", payload))
+ 
     return sends
 
 
