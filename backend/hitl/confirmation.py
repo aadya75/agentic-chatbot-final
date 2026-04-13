@@ -32,6 +32,7 @@ import json
 import logging
 import os
 
+from fastapi import params
 from langgraph.types import interrupt
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
@@ -152,56 +153,329 @@ def _draft_gmail_fields(task: dict, user_query: str, context: str) -> dict:
         "subject": drafted.get("subject", params.get("subject", "")),
         "body":    drafted.get("body",    params.get("body",    "")),
     }
+    
 
+def _is_valid_iso_datetime(dt_str: str) -> bool:
+    """Basic validation for ISO 8601 datetime with timezone."""
+    import re
+    if not dt_str:
+        return False
+    # Pattern: YYYY-MM-DDThh:mm:ss+hh:mm or YYYY-MM-DDThh:mm:ssZ
+    pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2}|Z)$'
+    return bool(re.match(pattern, dt_str))
+
+
+def _parse_natural_datetime(text: str) -> str:
+    """
+    Parse natural language time expressions into ISO 8601 datetime.
+    Handles: "tonight", "tomorrow", "next monday", "10pm", etc.
+    """
+    from datetime import datetime, timedelta
+    import re
+    
+    if not text or not isinstance(text, str):
+        return ""
+    
+    text = text.lower().strip()
+    now = datetime.now()
+    today = now.date()
+    
+    # Handle pure natural language without numbers
+    time_mappings = {
+        # Day mappings
+        "tonight": (today, 22, 0),      # 10:00 PM
+        "tonite": (today, 22, 0),
+        "this evening": (today, 19, 0),  # 7:00 PM
+        "evening": (today, 19, 0),
+        "this morning": (today, 9, 0),   # 9:00 AM
+        "morning": (today, 9, 0),
+        "this afternoon": (today, 14, 0), # 2:00 PM
+        "afternoon": (today, 14, 0),
+        "noon": (today, 12, 0),
+        "midnight": (today, 0, 0),
+        "mid-day": (today, 12, 0),
+        "midday": (today, 12, 0),
+        
+        # Tomorrow variations
+        "tomorrow": (today + timedelta(days=1), 10, 0),
+        "tmr": (today + timedelta(days=1), 10, 0),
+        "tmrw": (today + timedelta(days=1), 10, 0),
+        "tomorrow morning": (today + timedelta(days=1), 9, 0),
+        "tomorrow afternoon": (today + timedelta(days=1), 14, 0),
+        "tomorrow evening": (today + timedelta(days=1), 19, 0),
+        "tomorrow night": (today + timedelta(days=1), 22, 0),
+        
+        # Yesterday
+        "yesterday": (today - timedelta(days=1), 10, 0),
+        "yday": (today - timedelta(days=1), 10, 0),
+        
+        # Now
+        "now": (today, now.hour, now.minute),
+        "right now": (today, now.hour, now.minute),
+        "immediately": (today, now.hour, now.minute + 5),
+        "asap": (today, now.hour, now.minute + 5),
+    }
+    
+    # Check for exact matches
+    if text in time_mappings:
+        date, hour, minute = time_mappings[text]
+        dt = datetime.combine(date, datetime.min.time()).replace(hour=hour, minute=minute)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+    
+    # Check for "tonight at X" or "tomorrow at X"
+    match = re.match(r'(tonight|tonite|tomorrow|tmr|tmrw|yesterday)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?', text)
+    if match:
+        day_word, hour_str, minute_str, ampm = match.groups()
+        hour = int(hour_str)
+        minute = int(minute_str) if minute_str else 0
+        
+        # Handle AM/PM
+        if ampm:
+            ampm = ampm.lower().replace('.', '')
+            if ampm == 'pm' and hour < 12:
+                hour += 12
+            elif ampm == 'am' and hour == 12:
+                hour = 0
+        
+        # Determine date
+        if day_word in ('tonight', 'tonite'):
+            # If it's before 5 PM, "tonight at 6" means today. If after 5 PM, might mean today or tomorrow?
+            # For simplicity: "tonight" always means today's date with PM hours
+            date = today
+            if hour < 12:  # If they said "tonight at 10" without am/pm, assume PM
+                hour += 12
+        elif day_word in ('tomorrow', 'tmr', 'tmrw'):
+            date = today + timedelta(days=1)
+        elif day_word == 'yesterday':
+            date = today - timedelta(days=1)
+        else:
+            date = today
+        
+        dt = datetime.combine(date, datetime.min.time()).replace(hour=hour, minute=minute)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+    
+    # Handle "next monday", "this friday", etc.
+    days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+    for i, day in enumerate(days):
+        patterns = [
+            rf'(?:next|this)\s+{day}',
+            rf'{day}',
+        ]
+        for pattern in patterns:
+            if re.search(pattern, text):
+                target_weekday = i
+                current_weekday = today.weekday()
+                
+                # Calculate days until target
+                if 'next' in text:
+                    days_ahead = (target_weekday - current_weekday) % 7
+                    if days_ahead == 0:
+                        days_ahead = 7
+                else:
+                    days_ahead = (target_weekday - current_weekday) % 7
+                    if days_ahead == 0:
+                        days_ahead = 0  # Today if same day
+                
+                target_date = today + timedelta(days=days_ahead)
+                
+                # Extract time if present
+                time_match = re.search(r'(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?', text)
+                if time_match:
+                    hour_str, minute_str, ampm = time_match.groups()
+                    hour = int(hour_str)
+                    minute = int(minute_str) if minute_str else 0
+                    if ampm:
+                        ampm = ampm.lower().replace('.', '')
+                        if ampm == 'pm' and hour < 12:
+                            hour += 12
+                        elif ampm == 'am' and hour == 12:
+                            hour = 0
+                else:
+                    hour, minute = 10, 0  # Default 10 AM
+                
+                dt = datetime.combine(target_date, datetime.min.time()).replace(hour=hour, minute=minute)
+                return dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+    
+    # Handle time-only strings like "10pm", "3:30am"
+    time_match = re.match(r'^(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?$', text)
+    if time_match:
+        hour_str, minute_str, ampm = time_match.groups()
+        hour = int(hour_str)
+        minute = int(minute_str) if minute_str else 0
+        
+        if ampm:
+            ampm = ampm.lower().replace('.', '')
+            if ampm == 'pm' and hour < 12:
+                hour += 12
+            elif ampm == 'am' and hour == 12:
+                hour = 0
+        
+        # If time is in the past today, assume tomorrow
+        target_datetime = datetime.combine(today, datetime.min.time()).replace(hour=hour, minute=minute)
+        if target_datetime < now:
+            target_datetime += timedelta(days=1)
+        
+        return target_datetime.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+    
+    # If all parsing fails, return empty string
+    return ""
+
+
+def _normalize_datetime(dt_str: str) -> str:
+    """
+    Replace placeholders and natural language with actual dates.
+    """
+    from datetime import datetime, timedelta
+    import re
+    
+    if not dt_str:
+        return ""
+    
+    # First, try to parse natural language
+    parsed = _parse_natural_datetime(dt_str)
+    if parsed and _is_valid_iso_datetime(parsed):
+        return parsed
+    
+    today = datetime.now()
+    
+    # Replace common placeholders
+    replacements = {
+        "<today>": today.strftime("%Y-%m-%d"),
+        "<tomorrow>": (today + timedelta(days=1)).strftime("%Y-%m-%d"),
+        "<yesterday>": (today - timedelta(days=1)).strftime("%Y-%m-%d"),
+        "now": today.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    
+    result = dt_str
+    for placeholder, value in replacements.items():
+        result = result.replace(placeholder, value)
+    
+    # Handle patterns like "<today>T22:00:00"
+    match = re.match(r'<(\w+)>T(\d{2}):(\d{2}):(\d{2})', result)
+    if match:
+        day_word, hour, minute, second = match.groups()
+        day_lower = day_word.lower()
+        if day_lower in ("today", "now", "current", "tonight", "tonite"):
+            date_part = today.strftime("%Y-%m-%d")
+        elif day_lower in ("tomorrow", "tmr", "tmrw", "next day"):
+            date_part = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        elif day_lower in ("yesterday", "yday", "prev day", "previous day", "last day", "last night", "yest"):
+            date_part = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            date_part = today.strftime("%Y-%m-%d")
+        result = f"{date_part}T{hour}:{minute}:{second}+05:30"
+    
+    # Ensure timezone is present
+    if result and "T" in result and "+" not in result and "-" not in result and "Z" not in result:
+        result = result + "+05:30"
+    
+    return result
 
 def _draft_calendar_fields(task: dict, user_query: str, context: str) -> dict:
     """
     Draft title/start/end/attendees/description.
-    - If planner filled the essentials (title + start + end), skip LLM.
-    - Otherwise call the LLM with task params + fetched context.
+    FIXED: Falls back to parsing user query directly if LLM output is invalid.
     """
+    from datetime import datetime, timedelta
+    import re
+    
     params = task.get("parameters") or {}
     title  = params.get("summary") or params.get("title", "")
 
-    # Fast path
+    # Fast path — but still validate the dates!
     if title and params.get("start") and params.get("end"):
-        return {
-            "title":       title,
-            "start":       params.get("start",       ""),
-            "end":         params.get("end",         ""),
-            "attendees":   params.get("attendees",   ""),
-            "description": params.get("description", ""),
-        }
+        start = _normalize_datetime(params.get("start", ""))
+        end = _normalize_datetime(params.get("end", ""))
+        if start and end and _is_valid_iso_datetime(start) and _is_valid_iso_datetime(end):
+            return {
+                "title":       title,
+                "start":       start,
+                "end":         end,
+                "attendees":   params.get("attendees", ""),
+                "description": params.get("description", ""),
+            }
 
-    system = (
-    "You are a calendar event drafting assistant. "
-    "Draft the event fields based on the user's request and any retrieved context. "
-    "Return ONLY a raw JSON object with keys: title, start, end, attendees, description. "
-    "CRITICAL: start and end MUST be in ISO 8601 format WITH timezone offset, "
-    "e.g. '2026-04-15T10:00:00+05:30' for India Standard Time (IST). "
-    "Always include the +05:30 offset for IST. Never use bare datetime without timezone. "
-    "If no time is specified, default to tomorrow at 10:00:00+05:30 for start "
-    "and 11:00:00+05:30 for end. "
-    "Use empty string only for attendees and description if unknown. "
-    "No markdown fences, no explanation."
-    )
+    # Default to tomorrow 10:00-11:00 IST
+    tomorrow = datetime.now() + timedelta(days=1)
+    default_start = tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)
+    default_end = default_start + timedelta(hours=1)
+    
+    default_start_str = default_start.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+    default_end_str = default_end.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+
+    # Get current date for placeholder replacement
+    today = datetime.now()
+    today_str = today.strftime("%Y-%m-%d")
+    tomorrow_str = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    system = f"""
+You are a calendar event drafting assistant.
+Draft the event fields based on the user's request.
+
+CRITICAL: You MUST output REAL dates, NOT natural language.
+- Today's date is: {today_str}
+- Tomorrow's date is: {tomorrow_str}
+- Current time is: {datetime.now().strftime("%H:%M")}
+
+Return ONLY a raw JSON object with keys: title, start, end, attendees, description.
+
+DATETIME FORMAT (ABSOLUTELY REQUIRED):
+- start and end MUST be actual ISO 8601 strings with timezone.
+- Format: "YYYY-MM-DDThh:mm:ss+05:30"
+- Example for today at 10pm: "{today_str}T22:00:00+05:30"
+- Example for tomorrow at 9am: "{tomorrow_str}T09:00:00+05:30"
+- NEVER output words like "tonight", "tomorrow", "now" as the datetime value.
+- ALWAYS output the actual calculated date string.
+
+If the user says "tonight at 10pm", output: "{today_str}T22:00:00+05:30"
+If the user says "tomorrow at 2pm", output: "{tomorrow_str}T14:00:00+05:30"
+If no time specified, default to tomorrow 10:00-11:00.
+
+Use empty string "" for attendees and description if unknown.
+No markdown fences, no explanation. Output ONLY valid JSON.
+"""
     
     prompt = "\n\n".join(filter(None, [
         f"User request: {user_query}",
         f"Planner params: {json.dumps(params)}" if params else "",
         f"Retrieved context:\n{context[:2000]}"  if context else "",
-        "Draft the calendar event. Return JSON only.",
+        "Output the calendar event with REAL dates (no natural language words). Return JSON only.",
     ]))
 
     drafted = _call_draft_llm(system, prompt)
+    
+    # Normalize the dates (replace any remaining placeholders or natural language)
+    start = _normalize_datetime(drafted.get("start", ""))
+    end = _normalize_datetime(drafted.get("end", ""))
+    
+    # FALLBACK: If LLM output is still invalid, parse directly from user query
+    if not _is_valid_iso_datetime(start) or not _is_valid_iso_datetime(end):
+        logger.warning(f"LLM returned invalid dates: start='{start}', end='{end}'. Parsing from user query.")
+        
+        # Try to extract time from user query
+        parsed_start = _parse_natural_datetime(user_query)
+        if parsed_start:
+            start = parsed_start
+            # Default end to start + 1 hour
+            start_dt = datetime.fromisoformat(start.replace('+05:30', ''))
+            end_dt = start_dt + timedelta(hours=1)
+            end = end_dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+    
+    # If still invalid, use defaults
+    if not _is_valid_iso_datetime(start):
+        logger.warning(f"Invalid start time '{start}', using default: {default_start_str}")
+        start = default_start_str
+    if not _is_valid_iso_datetime(end):
+        logger.warning(f"Invalid end time '{end}', using default: {default_end_str}")
+        end = default_end_str
+
     return {
-        "title":       drafted.get("title",       title),
-        "start":       drafted.get("start",       params.get("start",       "")),
-        "end":         drafted.get("end",         params.get("end",         "")),
+        "title":       drafted.get("title",       title or "Event"),
+        "start":       start,
+        "end":         end,
         "attendees":   drafted.get("attendees",   params.get("attendees",   "")),
         "description": drafted.get("description", params.get("description", "")),
     }
-
 
 def _build_interrupt_payload(task: dict, user_query: str, context: str) -> dict:
     """
@@ -327,10 +601,24 @@ def confirmation_node(payload: dict) -> dict:
             f"Body:\n{params['body']}\n\n"
             f"Send this email exactly as specified using send_gmail_message tool."
         )
-        updated_task = {**task_dict, "parameters": params,
-                        "description": f"Send email to {params['to']} with subject '{params['subject']}'"}
+        
+        # AFTER — keep original description so dedup key stays stable
+        updated_task = {**task_dict, "parameters": params}
 
     elif "calendar" in wt or gs == "calendar":
+        
+        params["summary"] = data.get("title", interrupt_data.get("title", ""))
+        params["start_time"] = data.get("start", interrupt_data.get("start", ""))  # ← CHANGED
+        params["end_time"] = data.get("end", interrupt_data.get("end", ""))        # ← CHANGED
+        params["attendees"] = data.get("attendees", interrupt_data.get("attendees", ""))
+        params["description"] = data.get("description", interrupt_data.get("description", ""))
+        params["calendar_id"] = "primary"  # ← ADD THIS
+        
+        # Also keep the old keys for backward compatibility
+        params["start"] = params["start_time"]
+        params["end"] = params["end_time"]
+        params["title"] = params["summary"]
+            
         params["summary"]     = data.get("title",       interrupt_data.get("title",       ""))
         params["start"]       = data.get("start",       interrupt_data.get("start",       ""))
         params["end"]         = data.get("end",         interrupt_data.get("end",         ""))
@@ -346,11 +634,24 @@ def confirmation_node(payload: dict) -> dict:
             f"Description: {params['description']}\n\n"
             f"Create this event exactly as specified using the calendar create tool."
         )
+        
+        logger.info(f"=== HITL APPROVED CALENDAR PARAMS ===")
+        logger.info(f"  summary: {params.get('summary')}")
+        logger.info(f"  start: {params.get('start')}")
+        logger.info(f"  end: {params.get('end')}")
+        logger.info(f"  attendees: {params.get('attendees')}")
+        logger.info(f"  description: {params.get('description')}")
+        
         updated_task = {**task_dict, "parameters": params}
-
+        logger.info(f"  Updated task parameters: {json.dumps(updated_task.get('parameters', {}), default=str)}")
+    
     else:
         final_context = context
         updated_task  = task_dict
 
     updated_payload = {**payload, "task": updated_task, "context": final_context}
+    
+    logger.info(f"=== HITL FINAL PAYLOAD ===")
+    logger.info(f"  Payload task type: {updated_payload['task'].get('worker_type')}")
+    logger.info(f"  Payload task params: {json.dumps(updated_payload['task'].get('parameters', {}), default=str)}")
     return {"hitl_approved_payload": [updated_payload]}
