@@ -245,10 +245,14 @@ class OrchestratorState(TypedDict):
 
 _model = os.getenv("ORCHESTRATOR_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 llm = ChatGroq(model=_model, temperature=0.7, api_key=os.getenv("GROQ_API_KEY"))
+llm = ChatGroq(model=_model, temperature=0.7, api_key=os.getenv("GROQ_API_KEY"))
 
 _planning_model = os.getenv("PLANNING_MODEL", "llama-3.3-70b-versatile")
 planning_llm = ChatGroq(model=_planning_model, temperature=0.0, api_key=os.getenv("GROQ_API_KEY"))
+planning_llm = ChatGroq(model=_planning_model, temperature=0.0, api_key=os.getenv("GROQ_API_KEY"))
 
+_worker_model = os.getenv("WORKER_MODEL", "llama-3.1-8b-instant")
+worker_llm = ChatGroq(model=_worker_model, temperature=0.1, api_key=os.getenv("GROQ_API_KEY"))
 _worker_model = os.getenv("WORKER_MODEL", "llama-3.1-8b-instant")
 worker_llm = ChatGroq(model=_worker_model, temperature=0.1, api_key=os.getenv("GROQ_API_KEY"))
 
@@ -802,6 +806,8 @@ async def google_workspace_worker_node(payload: dict) -> dict:
             filtered = [t for t in all_tools
                         if any(kw in t.name.lower() for kw in gmail_kw)]
         elif google_service == "calendar":
+            filtered = [t for t in all_tools
+                        if any(kw in t.name.lower() for kw in cal_kw)]
             filtered = [t for t in all_tools
                         if any(kw in t.name.lower() for kw in cal_kw)]
         else:
