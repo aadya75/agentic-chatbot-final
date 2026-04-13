@@ -182,7 +182,7 @@ class ContextItem(BaseModel):
 
 
 class WorkerTask(BaseModel):
-    id: int
+    id: int=0
     title: str =""
     worker_type: Literal["github", "conversational", "gmail", "calendar"] = "conversational"
     description: str=""
@@ -236,9 +236,7 @@ class OrchestratorState(TypedDict):
     tasks: List[WorkerTask]
     results: Annotated[List[TaskResult], operator.add]
     final_response: str
-    # ── HITL: carries the approved/edited payload from confirmation_node
-    #    to google_workspace_worker. None means rejected or not applicable.
-    hitl_approved_payload: Optional[dict]
+    hitl_approved_payload: Annotated[List[dict], _merge_hitl_payloads] 
 
 
 # ============================================================================
@@ -301,9 +299,12 @@ STEP 4 — Choose worker_type and google_service per task:
   "gmail"  + google_service="gmail"      - read/search/send emails, summarize inbox
   "calendar" + google_service="calendar" - create/read/list events, summarize schedule
 
-  IMPORTANT: For ANY gmail or calendar task, you MUST set BOTH:
+  IMPORTANT: 
+1.For ANY gmail or calendar task, you MUST set BOTH:
     worker_type: "gmail" or "calendar"
     google_service: "gmail" or "calendar"   ← always set this, never omit it
+2.Every task MUST have a unique integer id starting from 1.
+    Never use id=0. Use id=1, id=2, id=3, etc.
 
 STEP 5 — Task splitting for "fetch context then act" queries:
   When the user wants to retrieve information AND then send an email or create
@@ -831,6 +832,8 @@ Tool contracts:
 - Create tools -> require: summary (title), start datetime (ISO), end datetime (ISO).
 - Update tools -> require event id. Search/list first to get the id, then update.
 
+Use time zone : GMT+5:30
+
 Present schedules in chronological order: Date | Time | Event title | Key details.
 """
         else:
@@ -937,18 +940,57 @@ def fanout_to_workers(state: OrchestratorState):
 # AGGREGATOR
 # ============================================================================
 
+def _merge_hitl_payloads(left: list, right: list) -> list:
+    """
+    Custom reducer for hitl_approved_payload.
+    Merges two lists, keeping only dicts and deduplicating by worker_type+description.
+    Filters out any non-dict values (ints, Nones) that checkpoint replay may inject.
+    """
+    combined = list(left or []) + list(right or [])
+    seen = set()
+    result = []
+    for p in combined:
+        if not isinstance(p, dict):
+            continue
+        task = p.get("task") or {}
+        key = f"{task.get('worker_type','')}:{task.get('description','')}"
+        if key not in seen:
+            seen.add(key)
+            result.append(p)
+    return result
+
 async def results_aggregator_node(state: OrchestratorState) -> dict:
-    results = state.get("results", [])
-    print(f"\n== AGGREGATING {len(results)} result(s) ==")
-    if not results:
-        return {"final_response": "No tasks executed."}
-    if len(results) == 1:
-        return {"final_response": results[0].output}
+    approved = [p for p in (state.get("hitl_approved_payload") or []) if isinstance(p, dict) and p]
+
+    logger.info(f"HITL aggregator: {len(approved)} approved payloads: "
+                f"{[(p.get('task',{}).get('worker_type'), p.get('task',{}).get('description','')[:30]) for p in approved]}")
+
+    google_results = []
+    if approved:
+        print(f"\n== HITL GOOGLE WORKER: {len(approved)} approved task(s) ==")
+        worker_outputs = await asyncio.gather(
+            *[google_workspace_worker_node(p) for p in approved],
+            return_exceptions=True,
+        )
+        for out in worker_outputs:
+            if isinstance(out, Exception):
+                cause = getattr(out, '__cause__', None) or getattr(out, '__context__', None)
+                logger.error(f"Google worker error: {out} | cause: {cause}")
+            else:
+                google_results.extend(out.get("results", []))
+
+    all_results = list(state.get("results") or []) + google_results
+    print(f"\n== AGGREGATING {len(all_results)} result(s) ==")
+
+    if not all_results:
+        return {"final_response": "No tasks executed.", "hitl_approved_payload": []}
+    if len(all_results) == 1:
+        return {"final_response": all_results[0].output, "hitl_approved_payload": []}
+
     results_text = "\n\n".join(
-        f"[{r.worker_type.upper()}] {r.output[:400]}..." for r in results
+        f"[{r.worker_type.upper()}] {r.output[:400]}" for r in all_results
     )
-    loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(
+    response = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: llm.invoke([
             SystemMessage(content="Integrate results from multiple sources helpfully."),
@@ -958,8 +1000,7 @@ async def results_aggregator_node(state: OrchestratorState) -> dict:
             )),
         ]),
     )
-    return {"final_response": response.content}
-
+    return {"final_response": response.content, "hitl_approved_payload": []}
 
 # ============================================================================
 # HITL GRAPH NODES
@@ -1016,9 +1057,10 @@ def route_after_confirmation(state: OrchestratorState) -> str:
     - If hitl_approved_payload is set → user approved → run google worker
     - Otherwise → user rejected or read-only already handled → go to aggregator
     """
-    payload = state.get("hitl_approved_payload")
-    if payload:
-        return "hitl_google_worker"
+    # payloads = state.get("hitl_approved_payload") or []
+    # approved = [p for p in payloads if p is not None]
+    # if approved:
+    #     return "hitl_google_worker"
     return "aggregator"
 
 
@@ -1027,13 +1069,17 @@ async def hitl_google_worker_node(state: OrchestratorState) -> dict:
     Dedicated google worker node called after HITL approval.
     Reads the approved payload from state instead of a Send() payload.
     """
-    payload = state.get("hitl_approved_payload")
-    if not payload:
-        return {"results": []}
-    # Clear the approved payload so it doesn't re-trigger on replay
-    result = await google_workspace_worker_node(payload)
-    result["hitl_approved_payload"] = None
-    return result
+    payloads = state.get("hitl_approved_payload") or []
+    approved = [p for p in payloads if p is not None]
+    if not approved:
+        return {"results": [], "hitl_approved_payload": []}
+
+    results = []
+    for payload in approved:
+        result = await google_workspace_worker_node(payload)
+        results.extend(result.get("results", []))
+
+    return {"results": results, "hitl_approved_payload": []}
 
 
 # ============================================================================
@@ -1102,7 +1148,7 @@ def build_smart_orchestrator_with_hitl(checkpointer=None):
 
     # ── HITL nodes ──
     g.add_node("confirmation_node",       confirmation_node)
-    g.add_node("hitl_google_worker",      hitl_google_worker_node)
+    # g.add_node("hitl_google_worker",      hitl_google_worker_node)
     # NOTE: google_workspace_worker is NOT in this graph —
     # all Google tasks go through confirmation_node → hitl_google_worker
 
@@ -1123,12 +1169,15 @@ def build_smart_orchestrator_with_hitl(checkpointer=None):
     })
 
     # ── After confirmation: approved → hitl_google_worker, rejected → aggregator ──
-    g.add_conditional_edges("confirmation_node", route_after_confirmation, {
-        "hitl_google_worker": "hitl_google_worker",
-        "aggregator":         "aggregator",
-    })
+    # g.add_conditional_edges("confirmation_node", route_after_confirmation, {
+    #     "hitl_google_worker": "hitl_google_worker",
+    #     "aggregator":         "aggregator",
+    # })
+    
+    # confirmation_node always goes to aggregator — no per-task routing
+    g.add_edge("confirmation_node", "aggregator")
 
-    for w in ("github_worker", "conversational_worker", "hitl_google_worker"):
+    for w in ("github_worker", "conversational_worker"):
         g.add_edge(w, "aggregator")
     g.add_edge("aggregator", END)
 
@@ -1172,40 +1221,83 @@ class SmartOrchestrator:
         return {"configurable": {"thread_id": thread_id}}
 
     def _extract_interrupt(self, state_or_exc, user_id: str, thread_id: str) -> dict | None:
-        """Detect LangGraph interrupt from state dict or exception."""
-        # Pattern 1: embedded in returned state
+        """Detect LangGraph interrupt(s) from state dict or exception."""
+        interrupts = []
+
         if isinstance(state_or_exc, dict):
             interrupt_data = state_or_exc.get("__interrupt__")
-            if interrupt_data:
-                msg = interrupt_data[0].value if hasattr(interrupt_data[0], "value") \
-                      else str(interrupt_data[0])
-                self._pending_confirmations[user_id] = {"thread_id": thread_id, "message": msg}
-                return {
-                    "success": True, "interrupted": True,
-                    "confirmation_required": {"message": msg, "thread_id": user_id},
-                }
+            if not interrupt_data:
+                return None
+            interrupts = interrupt_data
+        else:
+            exc = state_or_exc
+            if "interrupt" not in type(exc).__name__.lower() and \
+            "Interrupt" not in type(exc).__name__:
+                return None
+            try:
+                val = exc.value if hasattr(exc, "value") else str(exc)
+                if isinstance(val, (list, tuple)):
+                    interrupts = list(val)
+                else:
+                    interrupts = [val]
+            except Exception:
+                interrupts = [str(exc)]
+
+        if not interrupts:
             return None
 
-        # Pattern 2: raised as exception
-        exc = state_or_exc
-        if "interrupt" not in type(exc).__name__.lower() and \
-           "Interrupt" not in type(exc).__name__:
-            return None
+        # Always handle one interrupt at a time — take the first pending one
+        first = interrupts[0]
 
-        try:
-            val = exc.value if hasattr(exc, "value") else str(exc)
-            if isinstance(val, (list, tuple)) and val:
-                val = val[0].value if hasattr(val[0], "value") else str(val[0])
-            msg = str(val)
-        except Exception:
-            msg = str(exc)
+        # Extract the interrupt id (needed for multi-interrupt resume)
+        interrupt_id = getattr(first, "id", None)
+        msg = getattr(first, "value", str(first))
+        if isinstance(msg, bytes):
+            msg = msg.decode()
 
-        self._pending_confirmations[user_id] = {"thread_id": thread_id, "message": msg}
+        self._pending_confirmations[user_id] = {
+            "thread_id":    thread_id,
+            "message":      msg,
+            "interrupt_id": interrupt_id,   # ← store the id
+        }
         return {
             "success": True, "interrupted": True,
             "confirmation_required": {"message": msg, "thread_id": user_id},
         }
 
+
+    async def resume(self, user_id: str, user_response: str) -> dict:
+        pending = self._pending_confirmations.pop(user_id, None)
+        if not pending:
+            return {"success": False, "interrupted": False,
+                    "response": "No pending confirmation found. It may have expired.",
+                    "metadata": {}}
+
+        thread_id    = pending["thread_id"]
+        interrupt_id = pending.get("interrupt_id")
+        config       = self._make_config(thread_id)
+
+        # If we have an interrupt id (multi-interrupt case), use dict form
+        if interrupt_id is not None:
+            resume_command = Command(resume={interrupt_id: user_response})
+        else:
+            resume_command = Command(resume=user_response)
+
+        try:
+            final = await self.graph.ainvoke(resume_command, config=config)
+            interrupt_resp = self._extract_interrupt(final, user_id, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
+            return self._build_success_response(final)
+
+        except Exception as exc:
+            interrupt_resp = self._extract_interrupt(exc, user_id, thread_id)
+            if interrupt_resp:
+                return interrupt_resp
+            logger.error(f"Resume error: {exc}", exc_info=True)
+            return {"success": False, "interrupted": False,
+                    "response": f"Resume error: {exc}", "metadata": {}}
+            
     def _build_success_response(self, final: dict) -> dict:
         results = final.get("results", [])
         return {
@@ -1244,7 +1336,7 @@ class SmartOrchestrator:
             "tasks":                  [],
             "results":                [],
             "final_response":         "",
-            "hitl_approved_payload":  None,
+            "hitl_approved_payload":  [],
         }
 
         try:
@@ -1262,39 +1354,6 @@ class SmartOrchestrator:
             return {"success": False, "interrupted": False,
                     "response": f"Orchestrator error: {exc}", "metadata": {}}
 
-    async def resume(self, user_id: str, user_response: str) -> dict:
-        """
-        Resume a frozen graph. user_id is the key passed from the API
-        (the frontend sends back thread_id which equals user_id).
-        The actual LangGraph thread_id (with UUID suffix) is looked up
-        from _pending_confirmations.
-        """
-        pending = self._pending_confirmations.pop(user_id, None)
-        if not pending:
-            return {"success": False, "interrupted": False,
-                    "response": "No pending confirmation found. It may have expired.",
-                    "metadata": {}}
-
-        thread_id = pending["thread_id"]
-        config    = self._make_config(thread_id)
-
-        try:
-            final = await self.graph.ainvoke(
-                Command(resume=user_response),
-                config=config,
-            )
-            interrupt_resp = self._extract_interrupt(final, user_id, thread_id)
-            if interrupt_resp:
-                return interrupt_resp
-            return self._build_success_response(final)
-
-        except Exception as exc:
-            interrupt_resp = self._extract_interrupt(exc, user_id, thread_id)
-            if interrupt_resp:
-                return interrupt_resp
-            logger.error(f"Resume error: {exc}", exc_info=True)
-            return {"success": False, "interrupted": False,
-                    "response": f"Resume error: {exc}", "metadata": {}}
 
     def is_pending_confirmation(self, user_id: str) -> bool:
         return user_id in self._pending_confirmations

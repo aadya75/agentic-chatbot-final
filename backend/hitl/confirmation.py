@@ -71,6 +71,20 @@ def needs_confirmation(task: dict) -> bool:
     """Returns True if this task needs human approval before executing."""
     if not _is_google_task(task):
         return False
+    
+    wt = (task.get("worker_type") or "").lower()
+    gs = (task.get("google_service") or "").lower()
+    params = task.get("parameters") or {}
+
+    if "gmail" in wt or gs == "gmail":
+        if params.get("to") or params.get("body") or params.get("subject"):
+            return True
+
+    if "calendar" in wt or gs == "calendar":
+        if params.get("summary") or params.get("title") or params.get("start"):
+            return True
+        
+    
     combined = (
         (task.get("description") or "").lower() + " " +
         (task.get("title") or "").lower()
@@ -160,13 +174,18 @@ def _draft_calendar_fields(task: dict, user_query: str, context: str) -> dict:
         }
 
     system = (
-        "You are a calendar event drafting assistant. "
-        "Draft the event fields based on the user's request and any retrieved context. "
-        "Return ONLY a raw JSON object with keys: title, start, end, attendees, description. "
-        "Use ISO 8601 for start/end (e.g. 2024-01-15T10:00:00). "
-        "Use empty string for fields you cannot determine. "
-        "No markdown fences, no explanation."
+    "You are a calendar event drafting assistant. "
+    "Draft the event fields based on the user's request and any retrieved context. "
+    "Return ONLY a raw JSON object with keys: title, start, end, attendees, description. "
+    "CRITICAL: start and end MUST be in ISO 8601 format WITH timezone offset, "
+    "e.g. '2026-04-15T10:00:00+05:30' for India Standard Time (IST). "
+    "Always include the +05:30 offset for IST. Never use bare datetime without timezone. "
+    "If no time is specified, default to tomorrow at 10:00:00+05:30 for start "
+    "and 11:00:00+05:30 for end. "
+    "Use empty string only for attendees and description if unknown. "
+    "No markdown fences, no explanation."
     )
+    
     prompt = "\n\n".join(filter(None, [
         f"User request: {user_query}",
         f"Planner params: {json.dumps(params)}" if params else "",
@@ -233,7 +252,7 @@ def confirmation_node(payload: dict) -> dict:
     # ── 1. Read-only: pass straight to worker ────────────────────────
     if not needs_confirmation(task_dict):
         logger.info(f"HITL: task {task_dict.get('id')} is read-only, bypassing")
-        return {"hitl_approved_payload": payload}
+        return {"hitl_approved_payload": [payload]}
 
     # ── 2. Draft fields using LLM (context already available here) ────
     logger.info(f"HITL: drafting fields for task {task_dict.get('id')} "
@@ -255,7 +274,7 @@ def confirmation_node(payload: dict) -> dict:
     if clean.lower() in {"reject", "cancel", "no", "n"}:
         logger.info(f"HITL: task {task_dict.get('id')} REJECTED (plain string)")
         return {
-            "hitl_approved_payload": None,
+            "hitl_approved_payload": [],
             "results": [TaskResult(
                 task_id=task_dict.get("id", 0),
                 worker_type=task_dict.get("worker_type", "google"),
@@ -334,4 +353,4 @@ def confirmation_node(payload: dict) -> dict:
         updated_task  = task_dict
 
     updated_payload = {**payload, "task": updated_task, "context": final_context}
-    return {"hitl_approved_payload": updated_payload}
+    return {"hitl_approved_payload": [updated_payload]}
