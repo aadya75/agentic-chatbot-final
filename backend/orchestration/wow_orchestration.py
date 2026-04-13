@@ -893,17 +893,10 @@ EXECUTION RULES:
 - After a successful tool response (even 202 Accepted), consider the action DONE.
 - Do NOT retry if you receive a confirmation or an ID in the response.
 - Respond to the user immediately after one successful tool call.
-            system_content = """You are a Google Calendar assistant. Use the available Calendar tools.
-
-Tool contracts:
-- List/search tools -> return event objects: id, summary, start, end, attendees, description.
-- Create tools -> require: summary (title), start datetime (ISO), end datetime (ISO).
-- Update tools -> require event id. Search/list first to get the id, then update.
-
-Use time zone : GMT+5:30
 
 Present schedules in chronological order: Date | Time | Event title | Key details.
 """
+
         else:
             system_content = (
                 "You are a Google Workspace assistant. "
