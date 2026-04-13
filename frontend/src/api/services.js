@@ -4,7 +4,7 @@ import API_CONFIG, { ENDPOINTS } from './config.js';
 
 export const apiService = {
   // =========================================================================
-  // Helper to get auth token from storage
+  // Auth token helpers
   // =========================================================================
 
   getAuthToken() {
@@ -44,7 +44,7 @@ export const apiService = {
   },
 
   // =========================================================================
-  // Authentication Methods
+  // Authentication
   // =========================================================================
 
   async signup(userData) {
@@ -119,88 +119,62 @@ export const apiService = {
   },
 
   // =========================================================================
-  // OAuth Methods — FIXED
-  // Step 1: fetch the OAuth URL from backend (with Bearer token)
-  // Step 2: redirect browser to the OAuth provider (GitHub/Google)
+  // OAuth
   // =========================================================================
 
   async initiateGoogleLogin() {
     const token = this.getAuthToken();
     if (!token) throw new Error('Not authenticated');
-
-    // Fetch the Google OAuth URL from our backend (requires auth)
-    const response = await fetch(
-      `${API_CONFIG.BASE_URL}${ENDPOINTS.GOOGLE_CONNECT}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-
+    const response = await fetch(`${API_CONFIG.BASE_URL}${ENDPOINTS.GOOGLE_CONNECT}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to get Google connect URL');
     }
-
     const { url } = await response.json();
-    // Now redirect browser to Google (no auth header needed — it's Google's page)
     window.location.href = url;
   },
 
   async initiateGithubLogin() {
     const token = this.getAuthToken();
     if (!token) throw new Error('Not authenticated');
-
-    // Fetch the GitHub OAuth URL from our backend (requires auth)
-    const response = await fetch(
-      `${API_CONFIG.BASE_URL}${ENDPOINTS.GITHUB_CONNECT}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-
+    const response = await fetch(`${API_CONFIG.BASE_URL}${ENDPOINTS.GITHUB_CONNECT}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to get GitHub connect URL');
     }
-
     const { url } = await response.json();
-    // Now redirect browser to GitHub (no auth header needed — it's GitHub's page)
     window.location.href = url;
   },
 
   async disconnectGithub() {
     const token = this.getAuthToken();
     if (!token) throw new Error('Not authenticated');
-
-    const response = await fetch(
-      `${API_CONFIG.BASE_URL}${ENDPOINTS.GITHUB_DISCONNECT}`,
-      {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      }
-    );
-
+    const response = await fetch(`${API_CONFIG.BASE_URL}${ENDPOINTS.GITHUB_DISCONNECT}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to disconnect GitHub');
     }
-
     return response.json();
   },
 
   async disconnectGoogle() {
     const token = this.getAuthToken();
     if (!token) throw new Error('Not authenticated');
-
-    const response = await fetch(
-      `${API_CONFIG.BASE_URL}${ENDPOINTS.GOOGLE_DISCONNECT}`,
-      {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      }
-    );
-
+    const response = await fetch(`${API_CONFIG.BASE_URL}${ENDPOINTS.GOOGLE_DISCONNECT}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to disconnect Google');
     }
-
     return response.json();
   },
 
@@ -208,16 +182,40 @@ export const apiService = {
     const urlParams = new URLSearchParams(window.location.search);
     const token = urlParams.get('token');
     const error = urlParams.get('error');
-
     if (error) return { success: false, error };
-
     if (token) {
       this.setAuthToken(token, true);
       window.history.replaceState({}, document.title, window.location.pathname);
       return { success: true, token };
     }
-
     return { success: false, error: 'No token received' };
+  },
+
+  // =========================================================================
+  // Global Memory (user preferences)
+  // =========================================================================
+
+  /**
+   * Fetch saved preferences string for the current user.
+   * Returns "" if none saved yet.
+   */
+  async getPreferences() {
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    httpClient.setAuthToken(token);
+    const response = await httpClient.get(ENDPOINTS.GET_PREFERENCES);
+    return response.preferences || '';
+  },
+
+  /**
+   * Save/overwrite preferences (max 500 chars enforced server-side too).
+   */
+  async setPreferences(preferences) {
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    httpClient.setAuthToken(token);
+    const response = await httpClient.put(ENDPOINTS.SET_PREFERENCES, { preferences });
+    return response.preferences || preferences;
   },
 
   // =========================================================================
@@ -240,8 +238,10 @@ export const apiService = {
   },
 
   async listThreads() {
-    console.warn('listThreads endpoint not implemented in backend');
-    return [];
+    const token = this.getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    httpClient.setAuthToken(token);
+    return await httpClient.get(ENDPOINTS.LIST_THREADS);
   },
 
   async sendMessage(threadId, message, options = {}) {
@@ -251,39 +251,27 @@ export const apiService = {
     const response = await httpClient.post(ENDPOINTS.SEND_MESSAGE, {
       message,
       thread_id: threadId,
-      user_id: options.userId || null,
     });
     return { success: true, data: response };
   },
 
   /**
-   * Confirm (approve or reject) a pending HITL action.
-   * Called after sendMessage returns interrupted=true.
-   *
-   * @param {string} threadId   - From confirmation_required.thread_id
-   * @param {string} userResp   - "approve" or "reject"
-   * @returns {object}          - Same shape as sendMessage()
+   * Confirm or reject a pending HITL action.
+   * @param {string} threadId  - from confirmation_required.thread_id
+   * @param {string} userResp  - "approve" | "reject"
    */
   async confirmAction(threadId, userResp) {
     const token = this.getAuthToken();
     if (!token) throw new Error('Not authenticated');
     httpClient.setAuthToken(token);
-
-    if (API_CONFIG.DEBUG) {
-      console.log('🔐 HITL confirm:', { threadId, userResp });
-    }
-
-    const response = await httpClient.post('/api/message/confirm', {
+    if (API_CONFIG.DEBUG) console.log('🔐 HITL confirm:', { threadId, userResp });
+    const response = await httpClient.post(ENDPOINTS.CONFIRM_ACTION, {
       thread_id: threadId,
       response: userResp,
     });
-
     return { success: true, data: response };
   },
 
-  /**
-   * Stream a message response (Server-Sent Events)
-   */
   async streamMessage(threadId, message, onChunk, onComplete, onError) {
     try {
       const result = await this.sendMessage(threadId, message);

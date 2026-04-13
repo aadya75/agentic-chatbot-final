@@ -24,7 +24,7 @@ export const ENDPOINTS = {
   HEALTH:        '/api/health',
   STATUS:        '/api/status',
 
-  // Auth  (no /api prefix — matches backend)
+  // Auth
   SIGNUP:        '/auth/signup',
   LOGIN:         '/auth/login',
   LOGOUT:        '/auth/logout',
@@ -39,13 +39,19 @@ export const ENDPOINTS = {
   GITHUB_CALLBACK:   '/auth/github/callback',
   GITHUB_DISCONNECT: '/auth/github/disconnect',
 
-  // Chat  (/api prefix — matches backend)
+  // Chat
   SEND_MESSAGE:        '/api/message',
+  CONFIRM_ACTION:      '/api/message/confirm',
   CREATE_THREAD:       '/api/thread',
+  LIST_THREADS:        '/api/threads',
   GET_THREAD_MESSAGES: (threadId) => `/api/threads/${threadId}/messages`,
   DELETE_THREAD:       (threadId) => `/api/thread/${threadId}`,
 
-  // Knowledge  (/api/knowledge prefix — matches backend)
+  // Memory
+  GET_PREFERENCES:  '/api/memory/preferences',
+  SET_PREFERENCES:  '/api/memory/preferences',
+
+  // Knowledge
   KNOWLEDGE_UPLOAD:  '/api/knowledge/upload',
   KNOWLEDGE_STATUS:  (taskId) => `/api/knowledge/status/${taskId}`,
   KNOWLEDGE_LIST:    '/api/knowledge/resources',
