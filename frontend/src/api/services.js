@@ -256,9 +256,55 @@ export const apiService = {
   },
 
   /**
-   * Confirm or reject a pending HITL action.
-   * @param {string} threadId  - from confirmation_required.thread_id
-   * @param {string} userResp  - "approve" | "reject"
+   * Send a message
+   */
+  async sendMessage(threadId, message, options = {}) {
+    try {
+      const token = this.getAuthToken();
+      if (!token) {
+        throw new Error('Not authenticated');
+      }
+      
+      httpClient.setAuthToken(token);
+      
+      if (API_CONFIG.DEBUG) {
+        console.log('📨 Sending message:', { threadId, message });
+      }
+      
+      const response = await httpClient.post(ENDPOINTS.SEND_MESSAGE, {
+        message: message,
+        thread_id: threadId,
+        user_id: options.userId || null
+      });
+      
+      if (API_CONFIG.DEBUG) {
+        console.log('📬 Received response:', response);
+      }
+      
+      return {
+        success: true,
+        data: response
+      };
+    } catch (error) {
+      console.error('❌ Failed to send message:', error);
+      throw error;
+    }
+
+    const response = await httpClient.post('/api/message/confirm', {
+      thread_id: threadId,
+      response: userResp,
+    });
+
+    return { success: true, data: response };
+  },
+
+  /**
+   * Confirm (approve or reject) a pending HITL action.
+   * Called after sendMessage returns interrupted=true.
+   *
+   * @param {string} threadId   - From confirmation_required.thread_id
+   * @param {string} userResp   - "approve" or "reject"
+   * @returns {object}          - Same shape as sendMessage()
    */
   async confirmAction(threadId, userResp) {
     const token = this.getAuthToken();
@@ -274,8 +320,15 @@ export const apiService = {
 
   async streamMessage(threadId, message, onChunk, onComplete, onError) {
     try {
+      const token = this.getAuthToken();
+      if (!token) {
+        throw new Error('Not authenticated');
+      }
+      
+      // For now, fall back to regular message
       const result = await this.sendMessage(threadId, message);
       if (result.success) {
+        // Simulate streaming by sending the complete response as one chunk
         onChunk?.({ type: 'token', content: result.data.message });
         onComplete?.();
       }
