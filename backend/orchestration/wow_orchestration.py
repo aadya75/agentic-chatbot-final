@@ -399,9 +399,16 @@ def planning_agent_node(state: OrchestratorState) -> dict:
     logger.info(f"Planning for query: {state['user_query'][:120]}")
 
     planner = planning_llm.with_structured_output(ExecutionPlan)
+    history = state.get("conversation_history", [])
+    # conversation_history is already built_context() output — just prepend it
+    context_block = "\n".join(history) if history else ""
     messages = [
         SystemMessage(content=PLANNING_SYSTEM),
-        HumanMessage(content=f"User Query: {state['user_query'][:500]}"),
+        HumanMessage(content=(
+            f"{context_block}\n\nUser Query: {state['user_query'][:500]}"
+            if context_block else
+            f"User Query: {state['user_query'][:500]}"
+        ))
     ]
 
     plan: ExecutionPlan | None = None
@@ -987,25 +994,6 @@ async def conversational_worker_node(payload: dict) -> dict:
     ctx_info = f" [{len(context)} chars context]" if context else " [no context]"
     print(f"  CONVERSATIONAL: task {task_id}{ctx_info}")
     try:
-        # prompt = (
-        #     f"User Query: {user_query}\n"
-        #     + (f"\nContext from knowledge base:\n{context}\n" if context else "")
-        #     + f"\nTask: {task_data.get('description', 'Respond to the user query')}"
-        # )
-        # loop = asyncio.get_event_loop()
-        # response = await loop.run_in_executor(
-        #     None,
-        #     lambda: llm.invoke([
-        #         SystemMessage(content=(
-        #             "You are a helpful Robotic club assistant. You can retrieve context from user docs, web, and robotic club resources. "
-        #             "You have capability to execute gmail, google calendar and github operations for user. "
-        #             "You are here to assist the robotic club member and improve their productivity. "
-        #             "When context is provided, base your answer on it and cite specific details."
-        #         )),
-        #         HumanMessage(content=prompt),
-        #     ]),
-        # )
-
         conversation_history = payload.get("conversation_history", [])
  
         # Build system message
@@ -1027,12 +1015,13 @@ async def conversational_worker_node(payload: dict) -> dict:
     
         for line in conversation_history:
             line = line.strip()
-            if not line or line.startswith("["):
-                # Prefix lines ([User preferences:] etc.) go into system context, not turns
-                if line:
-                    messages[0] = SystemMessage(
-                        content=messages[0].content + f"\n\n{line}"
-                    )
+            if not line:
+                continue
+            # Route ALL bracketed metadata lines into system context
+            if line.startswith("["):
+                messages[0] = SystemMessage(
+                    content=messages[0].content + f"\n\n{line}"
+                )
                 continue
             if line.startswith("user:"):
                 messages.append(HumanMessage(content=line[5:].strip()))

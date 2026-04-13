@@ -9,6 +9,7 @@ Key design: instead of relying on the planner to pre-fill email/calendar fields
   - task.parameters  (whatever the planner already filled in)
   - payload["context"] (already fetched by the context layer before this runs)
   - user_query
+  - user_prefs (extracted from conversation_history — global memory tier)
 
 This means the modal is always pre-filled, even for queries like:
   "search my docs and email the summary to john@example.com"
@@ -18,6 +19,7 @@ Flow:
   planning → context fetch → execute_tasks → fanout → confirmation_node
                                                             ↓
                                                  draft fields with LLM
+                                                 (now includes user prefs)
                                                             ↓
                                                    interrupt(json_string)
                                                             ↓
@@ -31,11 +33,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 
-from fastapi import params
 from langgraph.types import interrupt
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +75,7 @@ def needs_confirmation(task: dict) -> bool:
     """Returns True if this task needs human approval before executing."""
     if not _is_google_task(task):
         return False
-    
+
     wt = (task.get("worker_type") or "").lower()
     gs = (task.get("google_service") or "").lower()
     params = task.get("parameters") or {}
@@ -84,8 +87,7 @@ def needs_confirmation(task: dict) -> bool:
     if "calendar" in wt or gs == "calendar":
         if params.get("summary") or params.get("title") or params.get("start"):
             return True
-        
-    
+
     combined = (
         (task.get("description") or "").lower() + " " +
         (task.get("title") or "").lower()
@@ -118,11 +120,29 @@ def _call_draft_llm(system: str, prompt: str) -> dict:
         return {}
 
 
-def _draft_gmail_fields(task: dict, user_query: str, context: str) -> dict:
+def _extract_user_prefs(conversation_history: list) -> str:
+    """
+    Pull the [User preferences: ...] line out of conversation_history
+    (which is the output of session_memory.build_context()).
+    Returns empty string if not present.
+    """
+    for line in (conversation_history or []):
+        stripped = (line or "").strip()
+        if stripped.startswith("[User preferences:"):
+            return stripped
+    return ""
+
+
+def _draft_gmail_fields(
+    task: dict,
+    user_query: str,
+    context: str,
+    user_prefs: str = "",
+) -> dict:
     """
     Draft to/subject/body.
     - If planner already filled all three, skip the LLM call entirely.
-    - Otherwise call the LLM with task params + fetched context.
+    - Otherwise call the LLM with task params + fetched context + user prefs.
     """
     params = task.get("parameters") or {}
 
@@ -136,11 +156,13 @@ def _draft_gmail_fields(task: dict, user_query: str, context: str) -> dict:
 
     system = (
         "You are an email drafting assistant. "
-        "Draft the email fields based on the user's request and any retrieved context. "
+        "Draft the email fields based on the user's request, any retrieved context, "
+        "and the user's known preferences if provided. "
         "Return ONLY a raw JSON object with keys: to, subject, body. "
         "No markdown fences, no explanation."
     )
     prompt = "\n\n".join(filter(None, [
+        user_prefs,                                                    # ← global memory
         f"User request: {user_query}",
         f"Planner params: {json.dumps(params)}" if params else "",
         f"Retrieved context:\n{context[:2000]}"  if context else "",
@@ -153,14 +175,12 @@ def _draft_gmail_fields(task: dict, user_query: str, context: str) -> dict:
         "subject": drafted.get("subject", params.get("subject", "")),
         "body":    drafted.get("body",    params.get("body",    "")),
     }
-    
+
 
 def _is_valid_iso_datetime(dt_str: str) -> bool:
     """Basic validation for ISO 8601 datetime with timezone."""
-    import re
     if not dt_str:
         return False
-    # Pattern: YYYY-MM-DDThh:mm:ss+hh:mm or YYYY-MM-DDThh:mm:ssZ
     pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2}|Z)$'
     return bool(re.match(pattern, dt_str))
 
@@ -170,222 +190,179 @@ def _parse_natural_datetime(text: str) -> str:
     Parse natural language time expressions into ISO 8601 datetime.
     Handles: "tonight", "tomorrow", "next monday", "10pm", etc.
     """
-    from datetime import datetime, timedelta
-    import re
-    
     if not text or not isinstance(text, str):
         return ""
-    
+
     text = text.lower().strip()
     now = datetime.now()
     today = now.date()
-    
-    # Handle pure natural language without numbers
+
     time_mappings = {
-        # Day mappings
-        "tonight": (today, 22, 0),      # 10:00 PM
-        "tonite": (today, 22, 0),
-        "this evening": (today, 19, 0),  # 7:00 PM
-        "evening": (today, 19, 0),
-        "this morning": (today, 9, 0),   # 9:00 AM
-        "morning": (today, 9, 0),
-        "this afternoon": (today, 14, 0), # 2:00 PM
-        "afternoon": (today, 14, 0),
-        "noon": (today, 12, 0),
-        "midnight": (today, 0, 0),
-        "mid-day": (today, 12, 0),
-        "midday": (today, 12, 0),
-        
-        # Tomorrow variations
-        "tomorrow": (today + timedelta(days=1), 10, 0),
-        "tmr": (today + timedelta(days=1), 10, 0),
-        "tmrw": (today + timedelta(days=1), 10, 0),
-        "tomorrow morning": (today + timedelta(days=1), 9, 0),
-        "tomorrow afternoon": (today + timedelta(days=1), 14, 0),
-        "tomorrow evening": (today + timedelta(days=1), 19, 0),
-        "tomorrow night": (today + timedelta(days=1), 22, 0),
-        
-        # Yesterday
-        "yesterday": (today - timedelta(days=1), 10, 0),
-        "yday": (today - timedelta(days=1), 10, 0),
-        
-        # Now
-        "now": (today, now.hour, now.minute),
-        "right now": (today, now.hour, now.minute),
-        "immediately": (today, now.hour, now.minute + 5),
-        "asap": (today, now.hour, now.minute + 5),
+        "tonight":         (today, 22, 0),
+        "tonite":          (today, 22, 0),
+        "this evening":    (today, 19, 0),
+        "evening":         (today, 19, 0),
+        "this morning":    (today, 9,  0),
+        "morning":         (today, 9,  0),
+        "this afternoon":  (today, 14, 0),
+        "afternoon":       (today, 14, 0),
+        "noon":            (today, 12, 0),
+        "midnight":        (today, 0,  0),
+        "mid-day":         (today, 12, 0),
+        "midday":          (today, 12, 0),
+        "tomorrow":                  (today + timedelta(days=1), 10, 0),
+        "tmr":                       (today + timedelta(days=1), 10, 0),
+        "tmrw":                      (today + timedelta(days=1), 10, 0),
+        "tomorrow morning":          (today + timedelta(days=1), 9,  0),
+        "tomorrow afternoon":        (today + timedelta(days=1), 14, 0),
+        "tomorrow evening":          (today + timedelta(days=1), 19, 0),
+        "tomorrow night":            (today + timedelta(days=1), 22, 0),
+        "yesterday":       (today - timedelta(days=1), 10, 0),
+        "yday":            (today - timedelta(days=1), 10, 0),
+        "now":             (today, now.hour, now.minute),
+        "right now":       (today, now.hour, now.minute),
+        "immediately":     (today, now.hour, now.minute + 5),
+        "asap":            (today, now.hour, now.minute + 5),
     }
-    
-    # Check for exact matches
+
     if text in time_mappings:
         date, hour, minute = time_mappings[text]
         dt = datetime.combine(date, datetime.min.time()).replace(hour=hour, minute=minute)
         return dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
-    
-    # Check for "tonight at X" or "tomorrow at X"
-    match = re.match(r'(tonight|tonite|tomorrow|tmr|tmrw|yesterday)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?', text)
+
+    match = re.match(
+        r'(tonight|tonite|tomorrow|tmr|tmrw|yesterday)\s+(?:at\s+)?'
+        r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?',
+        text,
+    )
     if match:
         day_word, hour_str, minute_str, ampm = match.groups()
-        hour = int(hour_str)
+        hour   = int(hour_str)
         minute = int(minute_str) if minute_str else 0
-        
-        # Handle AM/PM
         if ampm:
             ampm = ampm.lower().replace('.', '')
             if ampm == 'pm' and hour < 12:
                 hour += 12
             elif ampm == 'am' and hour == 12:
                 hour = 0
-        
-        # Determine date
         if day_word in ('tonight', 'tonite'):
-            # If it's before 5 PM, "tonight at 6" means today. If after 5 PM, might mean today or tomorrow?
-            # For simplicity: "tonight" always means today's date with PM hours
             date = today
-            if hour < 12:  # If they said "tonight at 10" without am/pm, assume PM
+            if hour < 12:
                 hour += 12
         elif day_word in ('tomorrow', 'tmr', 'tmrw'):
             date = today + timedelta(days=1)
-        elif day_word == 'yesterday':
-            date = today - timedelta(days=1)
         else:
-            date = today
-        
+            date = today - timedelta(days=1)
         dt = datetime.combine(date, datetime.min.time()).replace(hour=hour, minute=minute)
         return dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
-    
-    # Handle "next monday", "this friday", etc.
+
     days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
     for i, day in enumerate(days):
-        patterns = [
-            rf'(?:next|this)\s+{day}',
-            rf'{day}',
-        ]
-        for pattern in patterns:
-            if re.search(pattern, text):
-                target_weekday = i
-                current_weekday = today.weekday()
-                
-                # Calculate days until target
-                if 'next' in text:
-                    days_ahead = (target_weekday - current_weekday) % 7
-                    if days_ahead == 0:
-                        days_ahead = 7
-                else:
-                    days_ahead = (target_weekday - current_weekday) % 7
-                    if days_ahead == 0:
-                        days_ahead = 0  # Today if same day
-                
-                target_date = today + timedelta(days=days_ahead)
-                
-                # Extract time if present
-                time_match = re.search(r'(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?', text)
-                if time_match:
-                    hour_str, minute_str, ampm = time_match.groups()
-                    hour = int(hour_str)
-                    minute = int(minute_str) if minute_str else 0
-                    if ampm:
-                        ampm = ampm.lower().replace('.', '')
-                        if ampm == 'pm' and hour < 12:
-                            hour += 12
-                        elif ampm == 'am' and hour == 12:
-                            hour = 0
-                else:
-                    hour, minute = 10, 0  # Default 10 AM
-                
-                dt = datetime.combine(target_date, datetime.min.time()).replace(hour=hour, minute=minute)
-                return dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
-    
-    # Handle time-only strings like "10pm", "3:30am"
+        if re.search(rf'(?:next|this\s+)?{day}', text):
+            target_weekday  = i
+            current_weekday = today.weekday()
+            if 'next' in text:
+                days_ahead = (target_weekday - current_weekday) % 7 or 7
+            else:
+                days_ahead = (target_weekday - current_weekday) % 7
+            target_date = today + timedelta(days=days_ahead)
+            time_match = re.search(
+                r'(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?', text
+            )
+            if time_match:
+                h_str, m_str, ap = time_match.groups()
+                hour   = int(h_str)
+                minute = int(m_str) if m_str else 0
+                if ap:
+                    ap = ap.lower().replace('.', '')
+                    if ap == 'pm' and hour < 12:
+                        hour += 12
+                    elif ap == 'am' and hour == 12:
+                        hour = 0
+            else:
+                hour, minute = 10, 0
+            dt = datetime.combine(target_date, datetime.min.time()).replace(
+                hour=hour, minute=minute
+            )
+            return dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+
     time_match = re.match(r'^(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?$', text)
     if time_match:
-        hour_str, minute_str, ampm = time_match.groups()
-        hour = int(hour_str)
-        minute = int(minute_str) if minute_str else 0
-        
-        if ampm:
-            ampm = ampm.lower().replace('.', '')
-            if ampm == 'pm' and hour < 12:
+        h_str, m_str, ap = time_match.groups()
+        hour   = int(h_str)
+        minute = int(m_str) if m_str else 0
+        if ap:
+            ap = ap.lower().replace('.', '')
+            if ap == 'pm' and hour < 12:
                 hour += 12
-            elif ampm == 'am' and hour == 12:
+            elif ap == 'am' and hour == 12:
                 hour = 0
-        
-        # If time is in the past today, assume tomorrow
-        target_datetime = datetime.combine(today, datetime.min.time()).replace(hour=hour, minute=minute)
-        if target_datetime < now:
-            target_datetime += timedelta(days=1)
-        
-        return target_datetime.strftime("%Y-%m-%dT%H:%M:%S+05:30")
-    
-    # If all parsing fails, return empty string
+        target_dt = datetime.combine(today, datetime.min.time()).replace(
+            hour=hour, minute=minute
+        )
+        if target_dt < now:
+            target_dt += timedelta(days=1)
+        return target_dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+
     return ""
 
 
 def _normalize_datetime(dt_str: str) -> str:
-    """
-    Replace placeholders and natural language with actual dates.
-    """
-    from datetime import datetime, timedelta
-    import re
-    
+    """Replace placeholders and natural language with actual ISO 8601 dates."""
     if not dt_str:
         return ""
-    
-    # First, try to parse natural language
+
     parsed = _parse_natural_datetime(dt_str)
     if parsed and _is_valid_iso_datetime(parsed):
         return parsed
-    
+
     today = datetime.now()
-    
-    # Replace common placeholders
     replacements = {
-        "<today>": today.strftime("%Y-%m-%d"),
-        "<tomorrow>": (today + timedelta(days=1)).strftime("%Y-%m-%d"),
+        "<today>":     today.strftime("%Y-%m-%d"),
+        "<tomorrow>":  (today + timedelta(days=1)).strftime("%Y-%m-%d"),
         "<yesterday>": (today - timedelta(days=1)).strftime("%Y-%m-%d"),
-        "now": today.strftime("%Y-%m-%dT%H:%M:%S"),
+        "now":         today.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    
     result = dt_str
     for placeholder, value in replacements.items():
         result = result.replace(placeholder, value)
-    
-    # Handle patterns like "<today>T22:00:00"
+
     match = re.match(r'<(\w+)>T(\d{2}):(\d{2}):(\d{2})', result)
     if match:
         day_word, hour, minute, second = match.groups()
-        day_lower = day_word.lower()
-        if day_lower in ("today", "now", "current", "tonight", "tonite"):
+        dl = day_word.lower()
+        if dl in ("today", "now", "current", "tonight", "tonite"):
             date_part = today.strftime("%Y-%m-%d")
-        elif day_lower in ("tomorrow", "tmr", "tmrw", "next day"):
+        elif dl in ("tomorrow", "tmr", "tmrw", "next day"):
             date_part = (today + timedelta(days=1)).strftime("%Y-%m-%d")
-        elif day_lower in ("yesterday", "yday", "prev day", "previous day", "last day", "last night", "yest"):
-            date_part = (today - timedelta(days=1)).strftime("%Y-%m-%d")
         else:
-            date_part = today.strftime("%Y-%m-%d")
+            date_part = (today - timedelta(days=1)).strftime("%Y-%m-%d")
         result = f"{date_part}T{hour}:{minute}:{second}+05:30"
-    
-    # Ensure timezone is present
-    if result and "T" in result and "+" not in result and "-" not in result and "Z" not in result:
+
+    if result and "T" in result and "+" not in result and result.count("-") < 3 and "Z" not in result:
         result = result + "+05:30"
-    
+
     return result
 
-def _draft_calendar_fields(task: dict, user_query: str, context: str) -> dict:
+
+def _draft_calendar_fields(
+    task: dict,
+    user_query: str,
+    context: str,
+    user_prefs: str = "",
+) -> dict:
     """
     Draft title/start/end/attendees/description.
-    FIXED: Falls back to parsing user query directly if LLM output is invalid.
+    Falls back to parsing user query directly if LLM output is invalid.
+    Now accepts user_prefs from global memory for better pre-filling.
     """
-    from datetime import datetime, timedelta
-    import re
-    
     params = task.get("parameters") or {}
     title  = params.get("summary") or params.get("title", "")
 
-    # Fast path — but still validate the dates!
+    # Fast path — validate the dates first
     if title and params.get("start") and params.get("end"):
         start = _normalize_datetime(params.get("start", ""))
-        end = _normalize_datetime(params.get("end", ""))
+        end   = _normalize_datetime(params.get("end", ""))
         if start and end and _is_valid_iso_datetime(start) and _is_valid_iso_datetime(end):
             return {
                 "title":       title,
@@ -395,18 +372,15 @@ def _draft_calendar_fields(task: dict, user_query: str, context: str) -> dict:
                 "description": params.get("description", ""),
             }
 
-    # Default to tomorrow 10:00-11:00 IST
-    tomorrow = datetime.now() + timedelta(days=1)
+    tomorrow      = datetime.now() + timedelta(days=1)
     default_start = tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)
-    default_end = default_start + timedelta(hours=1)
-    
+    default_end   = default_start + timedelta(hours=1)
     default_start_str = default_start.strftime("%Y-%m-%dT%H:%M:%S+05:30")
-    default_end_str = default_end.strftime("%Y-%m-%dT%H:%M:%S+05:30")
+    default_end_str   = default_end.strftime("%Y-%m-%dT%H:%M:%S+05:30")
 
-    # Get current date for placeholder replacement
-    today = datetime.now()
-    today_str = today.strftime("%Y-%m-%d")
-    tomorrow_str = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+    today_str    = datetime.now().strftime("%Y-%m-%d")
+    tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    now_time_str = datetime.now().strftime("%H:%M")
 
     system = f"""
 You are a calendar event drafting assistant.
@@ -415,7 +389,7 @@ Draft the event fields based on the user's request.
 CRITICAL: You MUST output REAL dates, NOT natural language.
 - Today's date is: {today_str}
 - Tomorrow's date is: {tomorrow_str}
-- Current time is: {datetime.now().strftime("%H:%M")}
+- Current time is: {now_time_str}
 
 Return ONLY a raw JSON object with keys: title, start, end, attendees, description.
 
@@ -434,8 +408,9 @@ If no time specified, default to tomorrow 10:00-11:00.
 Use empty string "" for attendees and description if unknown.
 No markdown fences, no explanation. Output ONLY valid JSON.
 """
-    
+
     prompt = "\n\n".join(filter(None, [
+        user_prefs,                                                    # ← global memory
         f"User request: {user_query}",
         f"Planner params: {json.dumps(params)}" if params else "",
         f"Retrieved context:\n{context[:2000]}"  if context else "",
@@ -443,30 +418,27 @@ No markdown fences, no explanation. Output ONLY valid JSON.
     ]))
 
     drafted = _call_draft_llm(system, prompt)
-    
-    # Normalize the dates (replace any remaining placeholders or natural language)
+
     start = _normalize_datetime(drafted.get("start", ""))
-    end = _normalize_datetime(drafted.get("end", ""))
-    
-    # FALLBACK: If LLM output is still invalid, parse directly from user query
+    end   = _normalize_datetime(drafted.get("end", ""))
+
+    # Fallback: parse directly from user query
     if not _is_valid_iso_datetime(start) or not _is_valid_iso_datetime(end):
-        logger.warning(f"LLM returned invalid dates: start='{start}', end='{end}'. Parsing from user query.")
-        
-        # Try to extract time from user query
+        logger.warning(
+            f"LLM returned invalid dates: start='{start}', end='{end}'. "
+            "Parsing from user query."
+        )
         parsed_start = _parse_natural_datetime(user_query)
         if parsed_start:
             start = parsed_start
-            # Default end to start + 1 hour
             start_dt = datetime.fromisoformat(start.replace('+05:30', ''))
-            end_dt = start_dt + timedelta(hours=1)
-            end = end_dt.strftime("%Y-%m-%dT%H:%M:%S+05:30")
-    
-    # If still invalid, use defaults
+            end = (start_dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S+05:30")
+
     if not _is_valid_iso_datetime(start):
-        logger.warning(f"Invalid start time '{start}', using default: {default_start_str}")
+        logger.warning(f"Invalid start '{start}', using default.")
         start = default_start_str
     if not _is_valid_iso_datetime(end):
-        logger.warning(f"Invalid end time '{end}', using default: {default_end_str}")
+        logger.warning(f"Invalid end '{end}', using default.")
         end = default_end_str
 
     return {
@@ -477,27 +449,45 @@ No markdown fences, no explanation. Output ONLY valid JSON.
         "description": drafted.get("description", params.get("description", "")),
     }
 
-def _build_interrupt_payload(task: dict, user_query: str, context: str) -> dict:
+
+def _build_interrupt_payload(
+    task: dict,
+    user_query: str,
+    context: str,
+    user_prefs: str = "",
+) -> dict:
     """
     Build the structured dict passed to interrupt().
     Frontend reads this directly — no regex parsing needed.
+    user_prefs is injected from global memory (conversation_history prefix lines).
     """
     wt = (task.get("worker_type") or "").lower()
     gs = (task.get("google_service") or "").lower()
 
     if "gmail" in wt or gs == "gmail":
-        fields = _draft_gmail_fields(task, user_query, context)
-        return {"type": "gmail", "action": task.get("description", "Send email"),
-                "user_query": user_query, **fields}
+        fields = _draft_gmail_fields(task, user_query, context, user_prefs=user_prefs)
+        return {
+            "type": "gmail",
+            "action": task.get("description", "Send email"),
+            "user_query": user_query,
+            **fields,
+        }
 
     elif "calendar" in wt or gs == "calendar":
-        fields = _draft_calendar_fields(task, user_query, context)
-        return {"type": "calendar", "action": task.get("description", "Create calendar event"),
-                "user_query": user_query, **fields}
+        fields = _draft_calendar_fields(task, user_query, context, user_prefs=user_prefs)
+        return {
+            "type": "calendar",
+            "action": task.get("description", "Create calendar event"),
+            "user_query": user_query,
+            **fields,
+        }
 
     else:
-        return {"type": "google", "action": task.get("description", "Google action"),
-                "user_query": user_query}
+        return {
+            "type": "google",
+            "action": task.get("description", "Google action"),
+            "user_query": user_query,
+        }
 
 
 # ── LangGraph node ────────────────────────────────────────────────────────────
@@ -505,39 +495,54 @@ def _build_interrupt_payload(task: dict, user_query: str, context: str) -> dict:
 def confirmation_node(payload: dict) -> dict:
     """
     Called via Send("confirmation_node", payload).
-    payload keys: task, user_query, user_id, context (already fetched)
+    payload keys: task, user_query, user_id, context (already fetched),
+                  conversation_history (build_context() output — contains
+                  [User preferences: ...] and [Summary: ...] lines)
 
     Steps:
       1. Read-only task → pass straight through (no interrupt).
-      2. Write task → draft fields with LLM → interrupt(json) → FREEZE.
+      2. Write task → extract user prefs from history → draft fields with LLM
+         → interrupt(json) → FREEZE.
       3. On resume → inject user-edited values → return approved payload.
 
     State updates returned:
-      Approved:  {"hitl_approved_payload": updated_payload}
-      Rejected:  {"results": [TaskResult(...)], "hitl_approved_payload": None}
-      Read-only: {"hitl_approved_payload": payload}
+      Approved:  {"hitl_approved_payload": [updated_payload]}
+      Rejected:  {"results": [TaskResult(...)], "hitl_approved_payload": []}
+      Read-only: {"hitl_approved_payload": [payload]}
     """
     from orchestration.wow_orchestration import TaskResult
 
-    task_dict  = payload.get("task") or {}
-    user_query = payload.get("user_query") or ""
-    context    = payload.get("context") or ""   # already fetched by context layer
+    task_dict          = payload.get("task") or {}
+    user_query         = payload.get("user_query") or ""
+    context            = payload.get("context") or ""
+    conversation_history = payload.get("conversation_history") or []
+
+    # ── Extract global memory preferences line ────────────────────────
+    user_prefs = _extract_user_prefs(conversation_history)
+    if user_prefs:
+        logger.info(f"HITL: injecting user prefs into draft: {user_prefs[:80]}")
 
     # ── 1. Read-only: pass straight to worker ────────────────────────
     if not needs_confirmation(task_dict):
         logger.info(f"HITL: task {task_dict.get('id')} is read-only, bypassing")
         return {"hitl_approved_payload": [payload]}
 
-    # ── 2. Draft fields using LLM (context already available here) ────
-    logger.info(f"HITL: drafting fields for task {task_dict.get('id')} "
-                f"— {task_dict.get('description')} "
-                f"[context: {len(context)} chars]")
+    # ── 2. Draft fields using LLM (context + prefs available here) ────
+    logger.info(
+        f"HITL: drafting fields for task {task_dict.get('id')} "
+        f"— {task_dict.get('description')} "
+        f"[context: {len(context)} chars, prefs: {len(user_prefs)} chars]"
+    )
 
-    interrupt_data = _build_interrupt_payload(task_dict, user_query, context)
+    interrupt_data = _build_interrupt_payload(
+        task_dict, user_query, context, user_prefs=user_prefs
+    )
 
-    logger.info(f"HITL: pausing — type={interrupt_data.get('type')} "
-                f"to={interrupt_data.get('to', 'N/A')} "
-                f"title={interrupt_data.get('title', 'N/A')}")
+    logger.info(
+        f"HITL: pausing — type={interrupt_data.get('type')} "
+        f"to={interrupt_data.get('to', 'N/A')} "
+        f"title={interrupt_data.get('title', 'N/A')}"
+    )
 
     # Frontend receives this JSON string, parses it, pre-fills the modal
     user_response: str = interrupt(json.dumps(interrupt_data))  # ← GRAPH FREEZES
@@ -552,7 +557,9 @@ def confirmation_node(payload: dict) -> dict:
             "results": [TaskResult(
                 task_id=task_dict.get("id", 0),
                 worker_type=task_dict.get("worker_type", "google"),
-                success=False, output="❌ Action cancelled by user.", error="user_rejected",
+                success=False,
+                output="❌ Action cancelled by user.",
+                error="user_rejected",
             )],
         }
 
@@ -562,22 +569,26 @@ def confirmation_node(payload: dict) -> dict:
     except (json.JSONDecodeError, TypeError):
         logger.warning(f"HITL: unparseable resume response {clean!r} → reject")
         return {
-            "hitl_approved_payload": None,
+            "hitl_approved_payload": [],
             "results": [TaskResult(
                 task_id=task_dict.get("id", 0),
                 worker_type=task_dict.get("worker_type", "google"),
-                success=False, output="❌ Action cancelled (invalid response).", error="user_rejected",
+                success=False,
+                output="❌ Action cancelled (invalid response).",
+                error="user_rejected",
             )],
         }
 
     if not data.get("approved"):
         logger.info(f"HITL: task {task_dict.get('id')} REJECTED via JSON")
         return {
-            "hitl_approved_payload": None,
+            "hitl_approved_payload": [],
             "results": [TaskResult(
                 task_id=task_dict.get("id", 0),
                 worker_type=task_dict.get("worker_type", "google"),
-                success=False, output="❌ Action cancelled by user.", error="user_rejected",
+                success=False,
+                output="❌ Action cancelled by user.",
+                error="user_rejected",
             )],
         }
 
@@ -589,7 +600,6 @@ def confirmation_node(payload: dict) -> dict:
     gs = (task_dict.get("google_service") or "").lower()
 
     if "gmail" in wt or gs == "gmail":
-        # User-edited values win; fall back to what LLM drafted
         params["to"]      = data.get("to",      interrupt_data.get("to",      ""))
         params["subject"] = data.get("subject", interrupt_data.get("subject", ""))
         params["body"]    = data.get("body",    interrupt_data.get("body",    ""))
@@ -601,29 +611,19 @@ def confirmation_node(payload: dict) -> dict:
             f"Body:\n{params['body']}\n\n"
             f"Send this email exactly as specified using send_gmail_message tool."
         )
-        
-        # AFTER — keep original description so dedup key stays stable
         updated_task = {**task_dict, "parameters": params}
 
     elif "calendar" in wt or gs == "calendar":
-        
-        params["summary"] = data.get("title", interrupt_data.get("title", ""))
-        params["start_time"] = data.get("start", interrupt_data.get("start", ""))  # ← CHANGED
-        params["end_time"] = data.get("end", interrupt_data.get("end", ""))        # ← CHANGED
-        params["attendees"] = data.get("attendees", interrupt_data.get("attendees", ""))
-        params["description"] = data.get("description", interrupt_data.get("description", ""))
-        params["calendar_id"] = "primary"  # ← ADD THIS
-        
-        # Also keep the old keys for backward compatibility
-        params["start"] = params["start_time"]
-        params["end"] = params["end_time"]
-        params["title"] = params["summary"]
-            
+        # Populate both canonical key sets for maximum worker compatibility
         params["summary"]     = data.get("title",       interrupt_data.get("title",       ""))
+        params["title"]       = params["summary"]
         params["start"]       = data.get("start",       interrupt_data.get("start",       ""))
         params["end"]         = data.get("end",         interrupt_data.get("end",         ""))
+        params["start_time"]  = params["start"]
+        params["end_time"]    = params["end"]
         params["attendees"]   = data.get("attendees",   interrupt_data.get("attendees",   ""))
         params["description"] = data.get("description", interrupt_data.get("description", ""))
+        params["calendar_id"] = "primary"
 
         final_context = (
             f"CONFIRMED CALENDAR EVENT TO CREATE:\n"
@@ -634,24 +634,30 @@ def confirmation_node(payload: dict) -> dict:
             f"Description: {params['description']}\n\n"
             f"Create this event exactly as specified using the calendar create tool."
         )
-        
-        logger.info(f"=== HITL APPROVED CALENDAR PARAMS ===")
+
+        logger.info("=== HITL APPROVED CALENDAR PARAMS ===")
         logger.info(f"  summary: {params.get('summary')}")
         logger.info(f"  start: {params.get('start')}")
         logger.info(f"  end: {params.get('end')}")
         logger.info(f"  attendees: {params.get('attendees')}")
         logger.info(f"  description: {params.get('description')}")
-        
+
         updated_task = {**task_dict, "parameters": params}
-        logger.info(f"  Updated task parameters: {json.dumps(updated_task.get('parameters', {}), default=str)}")
-    
+        logger.info(
+            f"  Updated task parameters: "
+            f"{json.dumps(updated_task.get('parameters', {}), default=str)}"
+        )
+
     else:
         final_context = context
         updated_task  = task_dict
 
     updated_payload = {**payload, "task": updated_task, "context": final_context}
-    
-    logger.info(f"=== HITL FINAL PAYLOAD ===")
+
+    logger.info("=== HITL FINAL PAYLOAD ===")
     logger.info(f"  Payload task type: {updated_payload['task'].get('worker_type')}")
-    logger.info(f"  Payload task params: {json.dumps(updated_payload['task'].get('parameters', {}), default=str)}")
+    logger.info(
+        f"  Payload task params: "
+        f"{json.dumps(updated_payload['task'].get('parameters', {}), default=str)}"
+    )
     return {"hitl_approved_payload": [updated_payload]}
