@@ -1,13 +1,10 @@
 // frontend/src/Components/auth/ProfilePage.jsx
-//
-// Full-page profile + settings view.
-// Opened when user clicks the avatar button in the header.
-// Contains: account info, Google connect, GitHub connect, logout.
 
 import { useEffect } from "react";
 import { useAuth } from "../../context/AuthContext";
 import GoogleConnect from "./GoogleConnect";
 import GitHubConnect from "./GithubConnect";
+import GlobalMemory from "./GlobalMemory";
 import "./ProfilePage.css";
 
 export default function ProfilePage({ onBack }) {
@@ -15,14 +12,11 @@ export default function ProfilePage({ onBack }) {
 
   const handleLogout = async () => {
     await logout();
-    // AppGate will automatically show LoginPage once isAuthenticated is false
   };
 
-  // Handle OAuth redirects back to this page (?google=connected, ?github=connected)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("google") || params.get("github")) {
-      // Clean URL without causing a reload
       window.history.replaceState({}, "", window.location.pathname);
     }
   }, []);
@@ -43,7 +37,7 @@ export default function ProfilePage({ onBack }) {
           <h3 className="profile-section-title">Account</h3>
           <div className="profile-account-card">
             <div className="profile-avatar-large">
-              {user?.email?.[0]?.toUpperCase() || '?'}
+              {user?.email?.[0]?.toUpperCase() || "?"}
             </div>
             <div className="profile-account-info">
               <p className="profile-email">{user?.email}</p>
@@ -53,6 +47,16 @@ export default function ProfilePage({ onBack }) {
           <button className="logout-btn" onClick={handleLogout}>
             Sign out
           </button>
+        </section>
+
+        {/* Personal context / global memory */}
+        <section className="profile-section">
+          <h3 className="profile-section-title">Assistant memory</h3>
+          <p className="profile-section-desc">
+            Anything you write here is sent with every message — your role,
+            preferences, or anything the assistant should always know about you.
+          </p>
+          <GlobalMemory />
         </section>
 
         {/* Integrations section */}

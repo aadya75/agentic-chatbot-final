@@ -987,28 +987,75 @@ async def conversational_worker_node(payload: dict) -> dict:
     ctx_info = f" [{len(context)} chars context]" if context else " [no context]"
     print(f"  CONVERSATIONAL: task {task_id}{ctx_info}")
     try:
-        prompt = (
-            f"User Query: {user_query}\n"
-            + (f"\nContext from knowledge base:\n{context}\n" if context else "")
-            + f"\nTask: {task_data.get('description', 'Respond to the user query')}"
+        # prompt = (
+        #     f"User Query: {user_query}\n"
+        #     + (f"\nContext from knowledge base:\n{context}\n" if context else "")
+        #     + f"\nTask: {task_data.get('description', 'Respond to the user query')}"
+        # )
+        # loop = asyncio.get_event_loop()
+        # response = await loop.run_in_executor(
+        #     None,
+        #     lambda: llm.invoke([
+        #         SystemMessage(content=(
+        #             "You are a helpful Robotic club assistant. You can retrieve context from user docs, web, and robotic club resources. "
+        #             "You have capability to execute gmail, google calendar and github operations for user. "
+        #             "You are here to assist the robotic club member and improve their productivity. "
+        #             "When context is provided, base your answer on it and cite specific details."
+        #         )),
+        #         HumanMessage(content=prompt),
+        #     ]),
+        # )
+
+        conversation_history = payload.get("conversation_history", [])
+ 
+        # Build system message
+        system_msg = SystemMessage(content=(
+            "You are a helpful Robotic Club assistant. "
+            "You can retrieve context from user docs, web, and club resources. "
+            "You can execute Gmail, Google Calendar, and GitHub operations for the user. "
+            "You are here to assist the robotics club member and improve their productivity.\n\n"
+            "IMPORTANT: The conversation history below contains everything said earlier in this "
+            "session, including the user's name, preferences, and prior questions. "
+            "Always use it to maintain continuity — never say you don't know something "
+            "the user already told you this session.\n"
+            "When knowledge-base context is provided, base your answer on it and cite details."
+        ))
+    
+        # Build messages list: inject history as alternating human/ai turns
+        from langchain_core.messages import AIMessage
+        messages = [system_msg]
+    
+        for line in conversation_history:
+            line = line.strip()
+            if not line or line.startswith("["):
+                # Prefix lines ([User preferences:] etc.) go into system context, not turns
+                if line:
+                    messages[0] = SystemMessage(
+                        content=messages[0].content + f"\n\n{line}"
+                    )
+                continue
+            if line.startswith("user:"):
+                messages.append(HumanMessage(content=line[5:].strip()))
+            elif line.startswith("assistant:"):
+                messages.append(AIMessage(content=line[10:].strip()))
+            else:
+                messages.append(HumanMessage(content=line))
+    
+        # Add the actual current query
+        current_prompt = (
+            f"User Query: {user_query}"
+            + (f"\n\nContext from knowledge base:\n{context}" if context else "")
+            + f"\n\nTask: {task_data.get('description', 'Respond to the user query')}"
         )
+        messages.append(HumanMessage(content=current_prompt))
+    
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: llm.invoke([
-                SystemMessage(content=(
-                    "You are a helpful Robotic club assistant. You can retrieve context from user docs, web, and robotic club resources. "
-                    "You have capability to execute gmail, google calendar and github operations for user. "
-                    "You are here to assist the robotic club member and improve their productivity. "
-                    "When context is provided, base your answer on it and cite specific details."
-                )),
-                HumanMessage(content=prompt),
-            ]),
-        )
-        return {"results": [_task_result(
-            task_id=task_id, worker_type="conversational",
-            success=True, output=response.content, used_context=bool(context)
-        )]}
+        response = await loop.run_in_executor(None, lambda: llm.invoke(messages))
+    
+
+        return {"results": [TaskResult(task_id=task_id, worker_type="conversational",
+                                       success=True, output=response.content,
+                                       used_context=bool(context))]}
     except Exception as exc:
         logger.error(f"Conversational task {task_id} failed: {exc}")
         return {"results": [_task_result(
@@ -1031,6 +1078,7 @@ def fanout_to_workers(state: OrchestratorState):
             "task": task.model_dump(),
             "user_query": state["user_query"],
             "user_id": user_id,
+            "conversation_history": state.get("conversation_history", [])
         }
         if context:
             payload["context"] = context
@@ -1146,6 +1194,7 @@ def fanout_to_workers_hitl(state: OrchestratorState):
             "task": task.model_dump(),
             "user_query": state["user_query"],
             "user_id": user_id,
+            "conversation_history": state.get("conversation_history", [])
         }
         if context:
             payload["context"] = context

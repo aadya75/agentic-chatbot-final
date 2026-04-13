@@ -1,0 +1,235 @@
+/* frontend/src/Components/settings/GlobalMemory.css */
+/* Matches the warm neutral palette and card style of ProfilePage.css */
+
+.gm-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #fff;
+  border: 1px solid #e8e6de;
+  border-radius: 12px;
+  padding: 18px 20px;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────── */
+
+.gm-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gm-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gm-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.gm-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: #1a1a18;
+}
+
+.gm-desc {
+  font-size: 13px;
+  color: #5f5e5a;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* ── Status badges ────────────────────────────────────────────────────── */
+
+.gm-badge {
+  margin-left: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 99px;
+  letter-spacing: 0.02em;
+}
+
+.gm-badge--saved {
+  background: #eaf4ee;
+  color: #2d7a46;
+}
+
+.gm-badge--error {
+  background: #fcebeb;
+  color: #a32d2d;
+}
+
+/* ── Field container ──────────────────────────────────────────────────── */
+
+.gm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid #d3d1c7;
+  border-radius: 8px;
+  background: #faf9f6;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.gm-field:focus-within {
+  border-color: #534AB7;
+  background: #fff;
+}
+
+.gm-field--error {
+  border-color: #e0a0a0;
+}
+
+/* ── Textarea ─────────────────────────────────────────────────────────── */
+
+.gm-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #1a1a18;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  line-height: 1.55;
+  min-height: 76px;
+}
+
+.gm-textarea::placeholder {
+  color: #b5b3aa;
+}
+
+/* ── Footer row (counter + buttons) ──────────────────────────────────── */
+
+.gm-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px 8px 14px;
+  border-top: 1px solid #eeece5;
+  background: #f5f4f0;
+}
+
+.gm-counter {
+  font-size: 12px;
+  color: #888780;
+  font-variant-numeric: tabular-nums;
+}
+
+.gm-counter--warn {
+  color: #c47b2b;
+  font-weight: 500;
+}
+
+.gm-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+
+.gm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 14px;
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  border: none;
+  transition: background 0.15s, opacity 0.15s;
+  white-space: nowrap;
+}
+
+.gm-btn--ghost {
+  background: none;
+  color: #5f5e5a;
+  border: 1px solid #d3d1c7;
+}
+
+.gm-btn--ghost:hover {
+  background: #f1efe8;
+}
+
+.gm-btn--primary {
+  background: #534AB7;
+  color: #fff;
+}
+
+.gm-btn--primary:hover:not(.gm-btn--disabled) {
+  background: #443da0;
+}
+
+.gm-btn--disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* ── Loading skeleton ─────────────────────────────────────────────────── */
+
+.gm-skeleton {
+  height: 76px;
+  background: linear-gradient(90deg, #f0ede6 25%, #e8e5dd 50%, #f0ede6 75%);
+  background-size: 200% 100%;
+  animation: gm-shimmer 1.4s infinite;
+}
+
+@keyframes gm-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Spinner ──────────────────────────────────────────────────────────── */
+
+.gm-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: gm-spin 0.65s linear infinite;
+}
+
+@keyframes gm-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Error text ───────────────────────────────────────────────────────── */
+
+.gm-error {
+  font-size: 12px;
+  color: #a32d2d;
+  margin: 0;
+}
+
+/* ── Hint line ────────────────────────────────────────────────────────── */
+
+.gm-hint {
+  font-size: 11px;
+  color: #aaa9a3;
+  margin: 0;
+}
+
+.gm-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  background: #f0ede6;
+  border: 1px solid #d3d1c7;
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: #5f5e5a;
+}

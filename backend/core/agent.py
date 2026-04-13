@@ -155,19 +155,20 @@ class AgentManager:
         self,
         message: str,
         thread_id: Optional[str] = None,
-        user_id: str = "",              # ← NEW: Supabase user UUID
+        user_id: str = "",
+        conversation_history: Optional[List[str]] = None,   # ← NEW (pre-built by chat.py)
     ) -> Dict[str, Any]:
         """
         Process a message through the orchestrator.
-        user_id is threaded into the orchestrator so workers can fetch
-        per-user Google / GitHub tokens from Supabase.
 
-        Returns either a normal response dict, or an interrupted dict if
-        the orchestrator needs human confirmation for a Google write action.
+        conversation_history — when provided by the caller (chat.py), it is used
+        directly instead of rebuilding from self.threads. This keeps agent.py
+        stateless with respect to memory; all persistence lives in session_memory.py.
         """
         if not self.is_initialized:
             raise RuntimeError("Agent not initialized")
 
+        # Ensure in-memory thread entry exists (lightweight fallback)
         if thread_id not in self.threads:
             self.threads[thread_id] = {
                 "created_at": datetime.utcnow().isoformat(),
@@ -178,15 +179,16 @@ class AgentManager:
 
         start = datetime.utcnow()
 
-        # Build conversation history for the orchestrator
-        history = [
-            f"{m['role']}: {m['content']}"
-            for m in self.threads[thread_id].get("messages", [])[-10:]
-        ]
+        # Use caller-supplied history; fall back to in-memory last 10 if absent
+        if conversation_history is None:
+            conversation_history = [
+                f"{m['role']}: {m['content']}"
+                for m in self.threads[thread_id].get("messages", [])[-10:]
+            ]
 
         result = await self.orchestrator.process(
             user_query=message,
-            conversation_history=history,
+            conversation_history=conversation_history,
             user_id=user_id,
         )
 
@@ -194,13 +196,10 @@ class AgentManager:
         message_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
 
-        # ── HITL: graph paused for human confirmation ──────────────────────
         if result.get("interrupted"):
-            # Store user message in thread but NOT an assistant response yet
             self.threads[thread_id]["messages"].append(
                 {"id": str(uuid.uuid4()), "role": "user", "content": message, "timestamp": now}
             )
-            # Return the interruption payload — API layer will forward to frontend
             return {
                 "interrupted": True,
                 "confirmation_required": result["confirmation_required"],
@@ -209,7 +208,6 @@ class AgentManager:
                 "execution_time": elapsed,
             }
 
-        # ── Normal response ────────────────────────────────────────────────
         response_text = result.get("response", "Sorry, I could not process that.")
 
         self.threads[thread_id]["messages"].extend([
@@ -224,7 +222,7 @@ class AgentManager:
             "message_id": message_id,
             "execution_time": elapsed,
         }
-
+    
     async def resume(
         self,
         thread_id: str,
